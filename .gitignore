@@ -1,0 +1,10 @@
+# API Keys
+.env
+
+# 临时文件
+_uploads/
+_reviews/
+__pycache__/
+*.pyc
+*.pyo
+_temp_export.xlsx
