@@ -1,10 +1,14 @@
 # API Keys
 .env
 
-# 临时文件
-_uploads/
-_reviews/
+# 运行时私有数据
+data/
+
+# IDE
+.idea/
+.DS_Store
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-_temp_export.xlsx
