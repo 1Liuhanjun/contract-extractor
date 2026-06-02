@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>合同字段提取系统</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="app-container">
+    <header>
+        <h1>📄 合同字段提取系统</h1>
+        <p class="subtitle">Stage 1: 事实抽取 → Stage 2: 标准化映射 → Excel | 累积文件: <code>_results/合同提取汇总.xlsx</code></p>
+    </header>
+
+    <!-- API 配置 -->
+    <section class="card config-card">
+        <div class="card-header" onclick="toggleSection('config-body')">
+            <span>⚙️ API 配置</span>
+            <span class="toggle-icon">▼</span>
+        </div>
+        <div id="config-body" class="card-body">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>API Key <span class="muted">（选填，.env 已配置可留空）</span></label>
+                    <input type="password" id="api-key" placeholder="留空则使用 .env 中的 Key" value="">
+                </div>
+                <div class="form-group">
+                    <label>Provider</label>
+                    <select id="api-provider">
+                        <option value="anthropic">Anthropic Claude</option>
+                        <option value="deepseek">DeepSeek</option>
+                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+                        <option value="openai">OpenAI</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tab 导航 -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('extract')">📥 提取</button>
+        <button class="tab-btn" onclick="switchTab('verify')">✅ 验证</button>
+        <button class="tab-btn" onclick="switchTab('history')">📋 复盘</button>
+    </div>
+
+    <!-- ==================== Tab: 提取 ==================== -->
+    <div id="tab-extract" class="tab-content active">
+        <!-- 拖拽上传 -->
+        <section class="card">
+            <div class="card-header">📤 上传合同文件</div>
+            <div class="card-body">
+                <div class="drop-zone" id="drop-zone"
+                     ondragover="event.preventDefault(); this.classList.add('dragover')"
+                     ondragleave="this.classList.remove('dragover')"
+                     ondrop="event.preventDefault(); this.classList.remove('dragover'); handleDrop(event)">
+                    <div class="drop-icon">📄</div>
+                    <p>拖拽 .docx / .txt 文件到此处</p>
+                    <p class="drop-hint">或点击按钮选择文件</p>
+                    <input type="file" id="file-input" multiple accept=".docx,.txt" style="display:none" onchange="handleSelect(event)">
+                    <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">选择文件</button>
+                </div>
+                <div id="file-list"></div>
+                <div class="actions">
+                    <button class="btn btn-primary" onclick="doUpload()" id="btn-upload">📤 上传到服务器</button>
+                    <button class="btn btn-primary" onclick="doProcess()" id="btn-process" disabled>🚀 开始提取</button>
+                    <button class="btn btn-danger" onclick="clearAll()">🗑️ 清空</button>
+                    <button class="btn btn-danger" onclick="shutdown()" style="background:var(--danger);margin-left:auto">🚪 退出</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 日志 -->
+        <section class="card" id="log-section" style="display:none">
+            <div class="card-header">📝 处理日志</div>
+            <div class="card-body"><pre id="log-output" class="log-box"></pre></div>
+        </section>
+
+        <!-- 结果 -->
+        <section class="card" id="result-section" style="display:none">
+            <div class="card-header">
+                <span>📊 提取结果</span>
+                <button class="btn btn-info btn-sm" onclick="showReport()">📋 生成报告</button>
+            </div>
+            <div class="card-body"><div id="result-table-wrapper" class="table-wrapper"></div></div>
+        </section>
+    </div>
+
+    <!-- ==================== Tab: 验证 ==================== -->
+    <div id="tab-verify" class="tab-content">
+        <section class="card">
+            <div class="card-header">📊 上传参考答案</div>
+            <div class="card-body">
+                <p class="hint">上传 <strong>合同台账表2.xlsx</strong>，系统会自动比对提取结果。</p>
+                <p class="hint">注意：只验证 <strong>21个需要提取的字段</strong>，标红字段和内部字段不参与比对。</p>
+                <p class="hint">第1行（合肥）已被用作少样本示例，建议验证第2行（安庆）和第3行（成都）。</p>
+
+                <div class="drop-zone small-drop"
+                     ondragover="event.preventDefault(); this.classList.add('dragover')"
+                     ondragleave="this.classList.remove('dragover')"
+                     ondrop="event.preventDefault(); this.classList.remove('dragover'); handleRefDrop(event)">
+                    <p>📊 拖拽参考答案 Excel 到此处</p>
+                    <input type="file" id="ref-input" accept=".xlsx" style="display:none" onchange="handleRefSelect(event)">
+                    <button class="btn btn-secondary btn-sm" onclick="document.getElementById('ref-input').click()">选择文件</button>
+                </div>
+                <div id="ref-info"></div>
+                <div id="ref-rows" class="ref-rows" style="display:none">
+                    <p class="hint">选择要验证的行：</p>
+                    <div id="ref-row-buttons"></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card" id="verify-result-section" style="display:none">
+            <div class="card-header">
+                <span>✅ 验证结果</span>
+                <button class="btn btn-info btn-sm" onclick="generateReview()">📋 生成复盘报告</button>
+            </div>
+            <div class="card-body" style="display:flex;gap:16px;flex-wrap:wrap">
+                <div style="flex:1;min-width:450px">
+                    <div id="verify-summary"></div>
+                    <div id="verify-table-wrapper" class="table-wrapper"></div>
+                </div>
+                <div class="chat-panel" style="flex:0 0 380px;min-width:300px">
+                    <div class="chat-header">💬 字段答疑</div>
+                    <div id="chat-messages" class="chat-messages">
+                        <div class="chat-msg system">👋 对某个字段的提取结果有疑问？在下方输入问题，我会结合事实抽取结果和合同原文帮你分析。</div>
+                    </div>
+                    <div class="chat-input-row">
+                        <input type="text" id="chat-input" placeholder="例如：为什么账期是30而不是45？" onkeydown="if(event.key==='Enter')sendChat()">
+                        <button class="btn btn-primary btn-sm" onclick="sendChat()">发送</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <!-- ==================== Tab: 复盘 ==================== -->
+    <div id="tab-history" class="tab-content">
+        <section class="card">
+            <div class="card-header">📋 复盘报告</div>
+            <div class="card-body">
+                <p class="hint">复盘报告保存在 <code>_reviews/</code> 文件夹中，<strong>不会更新到程序代码里</strong>。</p>
+                <p class="hint">每次生成复盘后，用 PyCharm 或 Finder 打开 <code>_reviews/</code> 目录查看。</p>
+                <div id="review-list"><p class="muted">暂无复盘报告。完成提取→验证后可生成。</p></div>
+            </div>
+        </section>
+    </div>
+
+    <!-- ==================== 报告面板 ==================== -->
+    <div id="report-panel" class="modal-overlay" style="display:none">
+        <div class="modal-container">
+            <div class="modal-header">
+                <h2>📋 工作报告</h2>
+                <button class="btn-close" onclick="closeReport()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="report-tabs">
+                    <button class="report-tab active" onclick="switchReportTab('stage1', this)">📖 事实抽取</button>
+                    <button class="report-tab" onclick="switchReportTab('stage2', this)">🔄 标准化映射</button>
+                    <button class="report-tab" onclick="switchReportTab('correction', this)">✅ 订正对比</button>
+                    <button class="report-tab" onclick="switchReportTab('llm-review', this)">🤖 LLM复核</button>
+                </div>
+
+                <!-- Stage 1: 事实抽取 -->
+                <div id="report-stage1" class="report-content active">
+                    <h3>📖 事实抽取结果</h3>
+                    <p class="hint">Stage 1 从合同原文中提取的原始事实，每项附带证据来源。</p>
+                    <div id="report-facts"></div>
+                </div>
+
+                <!-- Stage 2: 标准化映射 -->
+                <div id="report-stage2" class="report-content">
+                    <h3>🔄 标准化映射结果</h3>
+                    <p class="hint">Stage 2 基于知识库规则和少样本实例，将事实映射为标准字段值。</p>
+                    <div id="report-mapping"></div>
+                </div>
+
+                <!-- 订正对比 -->
+                <div id="report-correction" class="report-content">
+                    <h3>✅ 订正对比</h3>
+                    <p class="hint">上传参考答案后可查看AI提取值与参考值的对比。</p>
+                    <div id="report-correction-content">
+                        <p class="muted">请先上传参考答案进行验证。</p>
+                    </div>
+                </div>
+
+                <!-- LLM复核 -->
+                <div id="report-llm-review" class="report-content">
+                    <h3>🤖 LLM复核</h3>
+                    <p class="hint">对差异字段进行AI判断：是AI遗漏？合同本身没有？还是参考答案填错了？</p>
+                    <div id="review-results">
+                        <p class="muted">请先完成验证（上传参考答案 → 点击验证行），再点击下方按钮进行复核。</p>
+                    </div>
+                    <button class="btn btn-primary" onclick="runLLMReview()" id="btn-llm-review" style="margin-top:12px">🚀 执行LLM复核</button>
+                    <div id="review-status" style="margin-top:8px"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer><p>合同字段提取系统 v2 | 两阶段架构：事实抽取 → 标准化映射</p></footer>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// ============================================================
+// 状态
+// ============================================================
+let uploadedFileNames = [];
+let processResults = [];
+let refRows = [];
+let currentVerifyIndex = -1;
+
+// ============================================================
+// 工具
+// ============================================================
+function log(msg) {
+    const el = document.getElementById('log-output');
+    el.textContent += msg + '\n';
+    el.scrollTop = el.scrollHeight;
+}
+
+function showToast(msg, type='info') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = `toast toast-${type} show`;
+    setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+function escapeHtml(str) {
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+}
+
+function switchTab(tab) {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    document.querySelector(`.tab-btn[onclick*="${tab}"]`).classList.add('active');
+    document.getElementById(`tab-${tab}`).classList.add('active');
+}
+
+function toggleSection(id) {
+    const b = document.getElementById(id);
+    b.style.display = b.style.display === 'none' ? 'block' : 'none';
+}
+
+// ============================================================
+// 文件上传
+// ============================================================
+const pendingFiles = [];
+
+function handleDrop(e) {
+    for (const f of e.dataTransfer.files) {
+        if (f.name.endsWith('.docx') || f.name.endsWith('.txt')) pendingFiles.push(f);
+        else showToast(`不支持: ${f.name}`, 'warning');
+    }
+    renderPending();
+}
+
+function handleSelect(e) {
+    for (const f of e.target.files) {
+        if (f.name.endsWith('.docx') || f.name.endsWith('.txt')) pendingFiles.push(f);
+        else showToast(`不支持: ${f.name}`, 'warning');
+    }
+    e.target.value = '';
+    renderPending();
+}
+
+function renderPending() {
+    const c = document.getElementById('file-list');
+    if (pendingFiles.length === 0) { c.innerHTML = ''; return; }
+    c.innerHTML = '<h4>待上传文件:</h4>' + pendingFiles.map((f, i) =>
+        `<div class="file-item"><span>📄 ${f.name} (${(f.size/1024).toFixed(0)}KB)</span>
+         <button class="btn-remove" onclick="removePending(${i})">✕</button></div>`
+    ).join('');
+}
+
+function removePending(i) {
+    pendingFiles.splice(i, 1);
+    renderPending();
+}
+
+async function doUpload() {
+    if (pendingFiles.length === 0) { showToast('请先选择文件', 'warning'); return; }
+    const fd = new FormData();
+    for (const f of pendingFiles) fd.append('file', f);
+    try {
+        const r = await fetch('/api/upload', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error);
+        uploadedFileNames = [...uploadedFileNames, ...d.files];
+        pendingFiles.length = 0;
+        renderPending();
+        document.getElementById('btn-process').disabled = false;
+        showToast(`上传成功: ${d.files.join(', ')}`, 'success');
+    } catch (e) {
+        showToast(`上传失败: ${e.message}`, 'error');
+    }
+}
+
+async function clearAll() {
+    pendingFiles.length = 0;
+    uploadedFileNames = [];
+    processResults = [];
+    renderPending();
+    document.getElementById('file-list').innerHTML = '';
+    document.getElementById('result-section').style.display = 'none';
+    document.getElementById('log-section').style.display = 'none';
+    document.getElementById('btn-process').disabled = true;
+    await fetch('/api/clear', { method: 'POST' });
+    showToast('已清空', 'info');
+}
+
+async function shutdown() {
+    if (!confirm('确认退出？累积 Excel 已自动保存，关闭后需在 PyCharm 终端重新启动。')) return;
+    showToast('正在关闭服务器...', 'info');
+    try { await fetch('/api/shutdown', { method: 'POST' }); } catch (e) {}
+    document.body.innerHTML = '<div style="text-align:center;padding:100px 20px"><h2>👋 服务器已关闭</h2><p>累积结果: <code>_results/合同提取汇总.xlsx</code></p><p style="color:#9CA3AF">可以关闭此页面和 PyCharm 终端了</p></div>';
+}
+
+// ============================================================
+// 提取处理
+// ============================================================
+async function doProcess() {
+    if (uploadedFileNames.length === 0) { showToast('请先上传文件', 'warning'); return; }
+    const apiKey = document.getElementById('api-key').value;
+
+    document.getElementById('btn-process').disabled = true;
+    document.getElementById('btn-process').textContent = '⏳ 处理中...';
+    document.getElementById('log-section').style.display = 'block';
+    document.getElementById('log-output').textContent = '';
+
+    log('📤 上传文件...');
+    log(`   文件: ${uploadedFileNames.join(', ')}`);
+    log('');
+    log('🔧 正在提取 (Stage 1 → Stage 2)...');
+    log('   调用LLM可能需要30-60秒，请耐心等待...');
+
+    try {
+        const r = await fetch('/api/process', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_key: apiKey, api_provider: document.getElementById('api-provider').value })
+        });
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error);
+
+        processResults = d.results;
+        // 新合同提取 → 清掉旧合同的订正和复核数据
+        window._verifyData = null;
+        window._reviewData = null;
+        log(`✅ 处理完成: ${processResults.length} 份合同\n`);
+
+        for (const res of processResults) {
+            log(`  📄 ${res.file_name}:`);
+            if (res.error) { log(`    ❌ ${res.error}`); continue; }
+            const fields = res.result || {};
+            const filled = Object.entries(fields).filter(([,v]) => v && v !== '' && v !== 'null').length;
+            log(`    ✅ 提取到 ${filled} 个字段`);
+
+            const core = ['客户分类','业务类型','合同类型','客户名称','合同主体','合同开始时间','合同结束时间','账期（天）','保证金（万元）','税率','是否有旺季补偿','补偿比例','是否有油价联动'];
+            for (const k of core) {
+                if (fields[k]) log(`       ${k}: ${fields[k]}`);
+            }
+        }
+
+        renderResultTable(processResults);
+        document.getElementById('result-section').style.display = 'block';
+        document.getElementById('result-section').scrollIntoView({ behavior: 'smooth' });
+        showToast('提取完成！已追加到累积Excel', 'success');
+
+    } catch (e) {
+        log(`\n❌ 错误: ${e.message}`);
+        showToast(`处理失败: ${e.message}`, 'error');
+    }
+
+    document.getElementById('btn-process').disabled = false;
+    document.getElementById('btn-process').textContent = '🚀 开始提取';
+}
+
+function renderResultTable(results) {
+    const w = document.getElementById('result-table-wrapper');
+    if (!results || results.length === 0) { w.innerHTML = '<p class="muted">暂无结果</p>'; return; }
+
+    // LLM提取字段 + 代码生成字段（全部展示）
+    const coreFields = ['客户分类','业务类型','合同类型','省','市','客户名称','合同主体',
+        '合同编码','合同名称',  // 代码生成
+        '合同开始时间','合同结束时间','合同预警提醒',  // 合同预警=代码生成
+        '账期（天）','保证金（万元）','税率','是否有旺季补偿','补偿比例','是否有油价联动','油价基准(元/升）'];
+
+    let html = '<table class="result-table"><thead><tr><th>文件</th>';
+    for (const f of coreFields) html += `<th>${f}</th>`;
+    html += '</tr></thead><tbody>';
+
+    for (const r of results) {
+        html += `<tr><td class="file-cell">${r.file_name}</td>`;
+        for (const f of coreFields) {
+            let v = r.result?.[f];
+            v = (v === null || v === undefined || v === '' || v === 'null') ? '—' : String(v).substring(0, 40);
+            html += `<td>${escapeHtml(v)}</td>`;
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    w.innerHTML = html;
+}
+
+// ============================================================
+// 导出 Excel
+// ============================================================
+async function exportExcel() {
+    if (processResults.length === 0) { showToast('无数据可导出', 'warning'); return; }
+    try {
+        const r = await fetch('/api/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ results: processResults }),
+        });
+        if (!r.ok) throw new Error('导出失败');
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `合同提取结果_${new Date().toISOString().slice(0,10)}.xlsx`;
+        a.click();
+        URL.revokeObjectURL(url);
+        showToast('导出成功！', 'success');
+    } catch (e) {
+        showToast(`导出失败: ${e.message}`, 'error');
+    }
+}
+
+// ============================================================
+// 参考答案上传 & 验证
+// ============================================================
+function handleRefDrop(e) {
+    const f = e.dataTransfer.files[0];
+    if (f) uploadRef(f);
+}
+
+function handleRefSelect(e) {
+    if (e.target.files[0]) uploadRef(e.target.files[0]);
+    e.target.value = '';
+}
+
+async function uploadRef(file) {
+    if (!file.name.endsWith('.xlsx')) { showToast('请上传 .xlsx 文件', 'error'); return; }
+
+    const fd = new FormData();
+    fd.append('ref', file);
+    try {
+        const r = await fetch('/api/ref-data', { method: 'POST', body: fd });
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error);
+
+        refRows = d.rows;
+        document.getElementById('ref-info').innerHTML = `<div class="file-item">📊 已解析: ${d.row_count} 行数据</div>`;
+
+        // 展示行选择按钮
+        const btnContainer = document.getElementById('ref-row-buttons');
+        btnContainer.innerHTML = '';
+        for (let i = 0; i < d.rows.length; i++) {
+            const row = d.rows[i];
+            const label = row['客户名称'] || row['*客户名称'] || `第${i+2}行`;
+            const btn = document.createElement('button');
+            btn.className = `btn ${i === 0 ? 'btn-info' : 'btn-secondary'} btn-sm`;
+            btn.textContent = `第${i+2}行: ${String(label).substring(0, 25)}`;
+            btn.style.marginRight = '6px';
+            btn.style.marginBottom = '6px';
+            btn.onclick = () => runVerify(i);
+            btnContainer.appendChild(btn);
+        }
+        document.getElementById('ref-rows').style.display = 'block';
+        showToast(`解析成功: ${d.row_count} 行数据`, 'success');
+    } catch (e) {
+        showToast(`解析失败: ${e.message}`, 'error');
+    }
+}
+
+async function runVerify(rowIndex) {
+    if (processResults.length === 0) { showToast('请先提取合同', 'warning'); return; }
+    if (!refRows[rowIndex]) { showToast('无效的参考行', 'error'); return; }
+
+    // 对每个提取结果分别验证
+    currentVerifyIndex = rowIndex;
+    const refRow = refRows[rowIndex];
+
+    let allComparisons = [];
+    let totalCorrect = 0, totalWrong = 0, totalFields = 0;
+
+    for (const proc of processResults) {
+        try {
+            const r = await fetch('/api/verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    extracted: proc.result || {},
+                    ref_row: refRow,
+                    row_index: rowIndex,
+                })
+            });
+            const d = await r.json();
+            if (!d.success) throw new Error(d.error);
+
+            allComparisons.push({
+                file_name: proc.file_name,
+                comparison: d.comparison,
+            });
+            totalCorrect += d.comparison.summary.correct;
+            totalWrong += d.comparison.summary.wrong;
+            totalFields += d.comparison.summary.total;
+        } catch (e) {
+            showToast(`验证失败: ${proc.file_name} - ${e.message}`, 'error');
+        }
+    }
+
+    if (allComparisons.length === 0) return;
+
+    // 渲染
+    const accuracy = totalFields > 0 ? (totalCorrect / totalFields * 100).toFixed(1) : 0;
+    document.getElementById('verify-summary').innerHTML = `
+        <div class="summary-bar">
+            <span class="summary-item">📊 总字段: ${totalFields}</span>
+            <span class="summary-item green">✅ 一致: ${totalCorrect}</span>
+            <span class="summary-item red">❌ 不一致: ${totalWrong}</span>
+            <span class="summary-item ${accuracy >= 80 ? 'green' : 'red'}">🎯 准确率: ${accuracy}%</span>
+        </div>
+    `;
+
+    // 表格（按文件分组）
+    let html = '';
+    for (const item of allComparisons) {
+        html += `<h4 style="margin:12px 0 4px">📄 ${item.file_name}</h4>`;
+        html += '<table class="result-table"><thead><tr><th>字段</th><th>AI提取值</th><th>参考答案</th><th>判定</th></tr></thead><tbody>';
+
+        let hasAny = false;
+        for (const c of item.comparison.comparisons) {
+            if (c.status.includes('一致') && c.ai_value === '' && c.ref_value === '') continue;
+            hasAny = true;
+            const cls = c.status.includes('✅') ? 'row-ok' : c.status.includes('❌') ? 'row-error' : c.status.includes('⚠️') ? 'row-warn' : '';
+            html += `<tr class="${cls}"><td>${c.field}</td><td>${escapeHtml(c.ai_value || '（空）')}</td><td>${escapeHtml(c.ref_value || '（空）')}</td><td>${c.status}</td></tr>`;
+        }
+        if (!hasAny) html += '<tr><td colspan="4" class="muted">所有字段均为空</td></tr>';
+        html += '</tbody></table>';
+    }
+    document.getElementById('verify-table-wrapper').innerHTML = html;
+
+    document.getElementById('verify-result-section').style.display = 'block';
+    document.getElementById('verify-result-section').scrollIntoView({ behavior: 'smooth' });
+    showToast(`验证完成！准确率: ${accuracy}%`, 'success');
+
+    // 保存数据供生成复盘用
+    window._verifyData = { allComparisons, refRow, rowIndex };
+}
+
+// ============================================================
+// 生成复盘报告
+// ============================================================
+async function generateReview() {
+    if (!window._verifyData || processResults.length === 0) {
+        showToast('请先完成验证', 'warning');
+        return;
+    }
+
+    for (const item of window._verifyData.allComparisons) {
+        try {
+            const r = await fetch('/api/generate-review', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contract_name: item.file_name,
+                    extracted: processResults.find(p => p.file_name === item.file_name)?.result || {},
+                    reference: window._verifyData.refRow,
+                })
+            });
+            const d = await r.json();
+            if (d.success) {
+                showToast(`✅ 复盘已生成: ${item.file_name}`, 'success');
+            }
+        } catch (e) {
+            showToast(`生成复盘失败: ${item.file_name}`, 'error');
+        }
+    }
+
+    // 刷新复盘Tab
+    document.getElementById('review-list').innerHTML = `<p class="hint">复盘报告已保存到 <code>_reviews/</code> 目录。</p>`;
+}
+
+// ============================================================
+// 报告面板
+// ============================================================
+function showReport() {
+    const panel = document.getElementById('report-panel');
+    panel.style.display = 'flex';
+
+    // 渲染 Stage 1 事实
+    renderFacts();
+    // 渲染 Stage 2 映射
+    renderMapping();
+    // 尝试渲染订正对比
+    renderCorrection();
+}
+
+function closeReport() {
+    document.getElementById('report-panel').style.display = 'none';
+}
+
+function switchReportTab(tab, btn) {
+    document.querySelectorAll('.report-tab').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.report-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`report-${tab}`).classList.add('active');
+}
+
+function renderFacts() {
+    const container = document.getElementById('report-facts');
+    if (!processResults || processResults.length === 0) {
+        container.innerHTML = '<p class="muted">暂无事实数据</p>';
+        return;
+    }
+    const facts = processResults[0].facts;
+    if (!facts || Object.keys(facts).length === 0) {
+        container.innerHTML = '<p class="muted">无事实抽取结果</p>';
+        return;
+    }
+
+    let html = '';
+    let count = 0;
+    for (const [key, val] of Object.entries(facts)) {
+        if (count++ > 50) { html += `<p class="hint">...还有 ${Object.keys(facts).length - 50} 个事实</p>`; break; }
+        const v = typeof val === 'object' ? (val.value || '') : val;
+        const ev = typeof val === 'object' ? (val.evidence || '') : '';
+        html += `<div class="fact-card">
+            <div class="fact-key">📌 ${key}</div>
+            <div class="fact-value">${escapeHtml(String(v))}</div>
+            ${ev ? `<div class="fact-evidence">📎 ${escapeHtml(String(ev))}</div>` : ''}
+        </div>`;
+    }
+    container.innerHTML = html;
+}
+
+function renderMapping() {
+    const container = document.getElementById('report-mapping');
+    if (!processResults || processResults.length === 0) {
+        container.innerHTML = '<p class="muted">暂无映射数据</p>';
+        return;
+    }
+    const result = processResults[0].result;
+    if (!result || Object.keys(result).length === 0) {
+        container.innerHTML = '<p class="muted">无映射结果</p>';
+        return;
+    }
+
+    // 🟢 LLM 提取的字段
+    const llmFields = ['客户分类','业务类型','合同类型','省','市','客户名称','合同主体',
+                       '合同开始时间','合同结束时间','账期（天）','保证金（万元）','税率'];
+    const optionalFields = ['是否有旺季补偿','旺季补偿时间','旺季补偿规则','补偿比例',
+                           '是否有油价联动','油价基准(元/升）','是否有疫情补贴','补贴标准'];
+    // 🔵 代码自动生成
+    const codeFields = ['登记日期','合同编码','合同名称','合同预警提醒'];
+    // 🔴 不填写
+    const skipFields = ['项目名称/编号','是否完成签订','是否同步财务',
+                       '联系人','电话','地址','快递单号','钉钉审批单号'];
+
+    let html = '<h4 style="margin-bottom:8px">🟢 LLM 提取字段</h4>';
+    for (const key of [...llmFields, ...optionalFields]) {
+        const v = result[key];
+        if (v === undefined || v === null) continue;
+        const val = v !== '' && v !== 'null' && v !== null ? String(v) : '/';
+        const isFilled = val !== '/' && val !== '';
+        html += `<div class="mapping-card">
+            <span class="mapping-field">${key}</span>
+            <span class="mapping-value" style="color:${isFilled ? 'var(--success)' : 'var(--text-muted)'}">${escapeHtml(val)}</span>
+        </div>`;
+    }
+
+    html += '<h4 style="margin:12px 0 8px">🔵 代码自动生成</h4>';
+    for (const key of codeFields) {
+        const v = result[key];
+        const val = v ? String(v) : '/';
+        html += `<div class="mapping-card">
+            <span class="mapping-field">${key}</span>
+            <span class="mapping-value" style="color:var(--info)">${escapeHtml(val)}</span>
+        </div>`;
+    }
+
+    html += '<h4 style="margin:12px 0 8px">🔴 不填写</h4>';
+    for (const key of skipFields) {
+        html += `<div class="mapping-card">
+            <span class="mapping-field">${key}</span>
+            <span class="mapping-value" style="color:var(--text-muted)">（不填）</span>
+        </div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+function renderCorrection() {
+    const container = document.getElementById('report-correction-content');
+    if (!window._verifyData) {
+        container.innerHTML = '<p class="muted">⚠️ 请先切换到「✅ 验证」Tab → 上传参考答案 → 选择对应行进行验证。</p>';
+        return;
+    }
+    // 将验证结果填入
+    const v = window._verifyData;
+    let html = '<table class="result-table"><thead><tr><th>字段</th><th>AI提取值</th><th>参考答案</th><th>判定</th></tr></thead><tbody>';
+    for (const item of v.allComparisons) {
+        for (const c of item.comparison.comparisons) {
+            const cls = c.status.includes('✅') ? 'row-ok' : c.status.includes('❌') ? 'row-error' : c.status.includes('⚠️') ? 'row-warn' : '';
+            html += `<tr class="${cls}"><td>${c.field}</td><td>${escapeHtml(c.ai_value)}</td><td>${escapeHtml(c.ref_value)}</td><td>${c.status}</td></tr>`;
+        }
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+// ============================================================
+// LLM复核
+// ============================================================
+async function runLLMReview() {
+    if (!window._verifyData) {
+        showToast('请先完成验证', 'warning');
+        return;
+    }
+
+    const btn = document.getElementById('btn-llm-review');
+    btn.disabled = true;
+    btn.textContent = '⏳ 复核中...';
+    document.getElementById('review-status').textContent = '正在调用LLM分析差异原因...';
+
+    // 收集所有差异字段
+    const discrepancies = [];
+    for (const item of window._verifyData.allComparisons) {
+        for (const c of item.comparison.comparisons) {
+            if (c.status.includes('❌') || c.status.includes('⚠️')) {
+                // 排除标红字段的"多填"（正常的）
+                if (c.status.includes('多填') && ['登记日期','项目名称/编号','合同编码','合同名称','联系人','电话','地址','快递单号','钉钉审批单号'].includes(c.field)) {
+                    continue;
+                }
+                discrepancies.push({
+                    field: c.field,
+                    ai_value: c.ai_value,
+                    ref_value: c.ref_value,
+                });
+            }
+        }
+    }
+
+    if (discrepancies.length === 0) {
+        document.getElementById('review-status').textContent = '✅ 没有发现差异，无需复核';
+        btn.disabled = false;
+        btn.textContent = '🚀 执行LLM复核';
+        return;
+    }
+
+    // 从提取结果中取出合同原文（后端在 process_contract 时已缓存）
+    const contractText = (
+        (processResults && processResults.length > 0 && processResults[0].contract_text) || ''
+    );
+
+    const apiKey = document.getElementById('api-key').value;
+    const standardized = (processResults && processResults.length > 0 && processResults[0].result) || {};
+
+    try {
+        const r = await fetch('/api/llm-review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                discrepancies: discrepancies,
+                contract_text: contractText,
+                standardized: standardized,
+                extracted_facts: (processResults && processResults.length > 0 && processResults[0].facts) || {},
+                api_key: apiKey || undefined,
+                api_provider: document.getElementById('api-provider').value,
+            })
+        });
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error);
+
+        renderLLMReview(d.review);
+        document.getElementById('review-status').textContent = '✅ 复核完成';
+        showToast('LLM复核完成！', 'success');
+
+        // 自动切换到复核Tab
+        const reviewTab = document.querySelector('.report-tab[onclick*="llm-review"]');
+        if (reviewTab) switchReportTab('llm-review', reviewTab);
+
+    } catch (e) {
+        document.getElementById('review-status').textContent = `❌ 复核失败: ${e.message}`;
+        showToast(`复核失败: ${e.message}`, 'error');
+    }
+
+    btn.disabled = false;
+    btn.textContent = '🚀 执行LLM复核';
+}
+
+function renderLLMReview(review) {
+    const container = document.getElementById('review-results');
+    if (!Array.isArray(review)) {
+        container.innerHTML = `<pre class="log-box">${escapeHtml(JSON.stringify(review, null, 2))}</pre>`;
+        return;
+    }
+
+    let byJudgment = { 'AI正确': [], '参考答案正确': [], '都不正确': [], '其他': [] };
+    for (const item of review) {
+        const j = item.judgment || '';
+        const key = Object.keys(byJudgment).find(k => j.includes(k)) || '其他';
+        byJudgment[key].push(item);
+    }
+
+    let html = '<h4 style="margin-bottom:8px">复核结果分类</h4>';
+
+    const config = [
+        { key: 'AI正确', label: '🎯 AI正确', badge: 'badge-ai' },
+        { key: '参考答案正确', label: '✏️ 参考答案正确', badge: 'badge-ref' },
+        { key: '都不正确', label: '⚠️ 都不正确', badge: 'badge-none' },
+        { key: '其他', label: '❓ 其他', badge: 'badge-other' },
+    ];
+
+    for (const cfg of config) {
+        const items = byJudgment[cfg.key];
+        if (!items || items.length === 0) continue;
+        html += `<h5 style="margin:10px 0 4px;color:var(--text)">${cfg.label} (${items.length}项)</h5>`;
+        for (const item of items) {
+            const isMissing = item.is_field_missing;
+            html += `<div class="review-item">
+                <div class="review-field">📌 ${escapeHtml(item.field)}
+                    <span class="review-badge ${cfg.badge}">${escapeHtml(item.judgment || cfg.key)}</span>
+                </div>
+                <div class="review-diff">
+                    <span class="diff-ai">🤖 AI: ${escapeHtml(item.ai_value || '（空）')}</span>
+                    <span class="diff-ref">📝 参考: ${escapeHtml(item.ref_value || '（空）')}</span>
+                </div>
+                ${isMissing ? `<div class="contract-clause missing">⚠️ 合同中无此信息</div>` : ''}
+                ${!isMissing && item.contract_location ? `<div class="contract-clause">📍 <strong>原文位置</strong>: ${escapeHtml(item.contract_location)}</div>` : ''}
+                ${!isMissing && item.contract_text ? `<div class="contract-clause quote">📄 <strong>原文</strong>: ${escapeHtml(item.contract_text)}</div>` : ''}
+                <div class="review-explanation">🔍 <strong>依据</strong>: ${escapeHtml(item.explanation || '')}</div>
+            </div>`;
+        }
+    }
+
+    const total = Object.values(byJudgment).reduce((s, a) => s + a.length, 0);
+    if (total === 0) {
+        html += '<p class="muted">LLM返回结果为空</p>';
+    }
+
+    container.innerHTML = html;
+}
+
+// ============================================================
+// 字段答疑
+// ============================================================
+async function sendChat() {
+    const input = document.getElementById('chat-input');
+    const q = input.value.trim();
+    if (!q) return;
+
+    const msgs = document.getElementById('chat-messages');
+    msgs.innerHTML += `<div class="chat-msg user">${escapeHtml(q)}</div>`;
+    input.value = '';
+    msgs.scrollTop = msgs.scrollHeight;
+
+    // 收集上下文
+    const facts = (processResults && processResults.length > 0 && processResults[0].facts) || {};
+    const standardized = (processResults && processResults.length > 0 && processResults[0].result) || {};
+    const contractText = (processResults && processResults.length > 0 && processResults[0].contract_text) || '';
+    const apiKey = document.getElementById('api-key').value;
+
+    msgs.innerHTML += `<div class="chat-msg system">⏳ 分析中...</div>`;
+    msgs.scrollTop = msgs.scrollHeight;
+
+    try {
+        const r = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                question: q,
+                facts: facts,
+                standardized: standardized,
+                contract_text: contractText,
+                api_key: apiKey || undefined,
+                api_provider: document.getElementById('api-provider').value,
+            })
+        });
+        const d = await r.json();
+
+        // 去掉加载提示
+        const loading = msgs.querySelector('.chat-msg.system:last-child');
+        if (loading && loading.textContent.includes('⏳')) loading.remove();
+
+        if (d.success) {
+            msgs.innerHTML += `<div class="chat-msg assistant">${escapeHtml(d.answer)}</div>`;
+        } else {
+            msgs.innerHTML += `<div class="chat-msg system">❌ ${escapeHtml(d.error || '未知错误')}</div>`;
+        }
+    } catch (e) {
+        const loading = msgs.querySelector('.chat-msg.system:last-child');
+        if (loading) loading.remove();
+        msgs.innerHTML += `<div class="chat-msg system">❌ 网络错误: ${escapeHtml(e.message)}</div>`;
+    }
+    msgs.scrollTop = msgs.scrollHeight;
+}
+
+// 点击报告面板外部关闭
+document.addEventListener('click', function(e) {
+    const panel = document.getElementById('report-panel');
+    if (e.target === panel) closeReport();
+});
+</script>
+
+</body>
+</html>
