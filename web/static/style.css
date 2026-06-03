@@ -294,6 +294,9 @@ footer { text-align: center; padding: 20px 0; color: var(--text-muted); font-siz
 .badge-ref { background: #E0E7FF; color: #3730A3; }
 .badge-none { background: #FEE2E2; color: #991B1B; }
 .badge-other { background: #F3F4F6; color: #6B7280; }
+.badge-risk-high { background: #FEE2E2; color: #991B1B; }
+.badge-risk-medium { background: #FEF3C7; color: #92400E; }
+.badge-risk-low { background: #DCFCE7; color: #166534; }
 
 .review-diff {
     display: flex; gap: 16px; margin: 6px 0; font-size: 13px;

@@ -40,11 +40,13 @@ UPLOAD_DIR = os.path.join(PROJECT_DIR, "data/uploads")
 REVIEWS_DIR = os.path.join(PROJECT_DIR, "data/reviews")
 RESULTS_DIR = os.path.join(PROJECT_DIR, "data/results")
 OCR_TEXT_DIR = os.path.join(PROJECT_DIR, "data/ocr_texts")
+LEARNING_DIR = os.path.join(PROJECT_DIR, "data/learning_candidates")
 CUMULATIVE_EXCEL = os.path.join(RESULTS_DIR, "合同提取汇总.xlsx")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REVIEWS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(OCR_TEXT_DIR, exist_ok=True)
+os.makedirs(LEARNING_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -543,6 +545,8 @@ class ContractHandler(BaseHTTPRequestHandler):
             self._serve_html()
         elif path == "/api/files":
             self._list_files()
+        elif path == "/api/learning-candidates":
+            self._list_learning_candidates()
         elif path.startswith("/static/"):
             self._serve_static()
         else:
@@ -584,6 +588,38 @@ class ContractHandler(BaseHTTPRequestHandler):
         files = [f for f in os.listdir(UPLOAD_DIR) if f.lower().endswith((".txt", ".docx", ".pdf"))]
         self._send_json({"files": files})
 
+    def _list_learning_candidates(self):
+        """列出旁路候选记忆库。只读展示，不影响正式抽取。"""
+        records = []
+        for filename in sorted(os.listdir(LEARNING_DIR), reverse=True):
+            if not filename.endswith(".json"):
+                continue
+            path = os.path.join(LEARNING_DIR, filename)
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+
+            candidates = data.get("candidates", [])
+            if not isinstance(candidates, list):
+                candidates = []
+            records.append({
+                "file_name": filename,
+                "created_at": datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M:%S"),
+                "agent_role": data.get("agent_role", "learning_companion"),
+                "summary": data.get("summary", {}),
+                "candidates": candidates,
+            })
+
+        self._send_json({
+            "success": True,
+            "records": records,
+            "count": len(records),
+        })
+
     # ---- POST ----
     def do_POST(self):
         path = urlparse(self.path).path
@@ -604,6 +640,10 @@ class ContractHandler(BaseHTTPRequestHandler):
                 self._handle_ref_data()
             elif path == "/api/llm-review":
                 self._handle_llm_review()
+            elif path == "/api/learning-agent":
+                self._handle_learning_agent()
+            elif path == "/api/learning-candidate-status":
+                self._handle_learning_candidate_status()
             elif path == "/api/chat":
                 self._handle_chat()
             elif path == "/api/shutdown":
@@ -880,6 +920,260 @@ class ContractHandler(BaseHTTPRequestHandler):
         # result 可能是 dict（JSON）或纯文本
         answer = result.get("answer", str(result)) if isinstance(result, dict) else str(result)
         self._send_json({"success": True, "answer": answer})
+
+    def _handle_learning_agent(self):
+        """学习精灵：生成候选经验，不修改正式业务规则"""
+        body = self._read_body()
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._send_json({"error": "无效数据"}, 400)
+            return
+
+        facts = data.get("facts", {})
+        standardized = data.get("standardized", {})
+        contract_text = data.get("contract_text", "")
+        discrepancies = data.get("discrepancies", [])
+        llm_review = data.get("llm_review", [])
+        api_key = data.get("api_key", "")
+        api_provider = data.get("api_provider", "deepseek-v4-pro")
+
+        if not standardized:
+            self._send_json({"error": "缺少标准化结果，请先完成提取"}, 400)
+            return
+        if not contract_text and not facts:
+            self._send_json({"error": "缺少合同原文和事实抽取结果，请先完成提取"}, 400)
+            return
+
+        if not api_key:
+            env_map = {
+                "anthropic": "ANTHROPIC_API_KEY",
+                "deepseek": "DEEPSEEK_API_KEY",
+                "deepseek-v4-pro": "DEEPSEEK_API_KEY",
+                "openai": "OPENAI_API_KEY",
+            }
+            api_key = os.environ.get(env_map.get(api_provider, "DEEPSEEK_API_KEY"), "")
+        if not api_key:
+            self._send_json({"error": "未找到API Key"}, 400)
+            return
+
+        from llm_client import LLMClient
+        client = LLMClient(provider=api_provider, api_key=api_key)
+
+        facts_summary = json.dumps(facts, ensure_ascii=False, indent=2)[:5000]
+        result_summary = json.dumps(standardized, ensure_ascii=False, indent=2)[:3500]
+        diff_summary = json.dumps(discrepancies, ensure_ascii=False, indent=2)[:2500] if discrepancies else "[]"
+        review_summary = json.dumps(llm_review, ensure_ascii=False, indent=2)[:3500] if llm_review else "[]"
+        if contract_text:
+            contract_snippet = contract_text[:7000] + "\n...（中间省略）...\n" + contract_text[-4000:]
+        else:
+            contract_snippet = ""
+
+        system_prompt = """你是“合同学习精灵 Agent”，职责是在正式业务流程旁边总结候选经验。
+
+最高规则：
+- 你不能修改正式业务规则。
+- 你不能削弱或覆盖字段知识库。
+- 你只能生成“候选学习项”，供人工审核。
+- 候选学习项默认不参与提取，不进入 Stage 2 prompt，不写入 field_knowledge_base.py 或 few_shot_examples.py。
+- 如果证据不足，不要提出规则更新。
+
+输出必须是 JSON 对象，格式：
+{
+  "agent_role": "learning_companion",
+  "summary": {
+    "candidate_count": 0,
+    "high_confidence": 0,
+    "needs_business_review": 0
+  },
+  "candidates": [
+    {
+      "field": "字段名",
+      "candidate_type": "rule_update | few_shot_example | caution_note | no_action",
+      "observed_problem": "这次观察到的问题",
+      "proposed_learning": "候选经验/候选规则/候选少样本描述",
+      "evidence": "支持该候选经验的合同原文或复核依据",
+      "source": "validation_diff | llm_review | facts | contract_text",
+      "confidence": "high | medium | low",
+      "target": "field_knowledge_base.py | few_shot_examples.py | docs/字段提取业务规则手册.md | none",
+      "requires_human_approval": true,
+      "status": "pending_review",
+      "why_not_auto_apply": "为什么不能自动生效"
+    }
+  ]
+}
+
+候选学习项原则：
+- 只从明确差异、LLM复核结论、合同原文证据中总结。
+- 不要把一次偶然现象上升为通用规则；不确定就输出 no_action 或 low confidence。
+- 参考答案可能有错，所以不能仅凭参考答案提出规则更新。
+- 更推荐输出 caution_note 或 few_shot_example，而不是直接 rule_update。
+- 所有 candidates 都必须 requires_human_approval=true 且 status=pending_review。
+"""
+
+        user_prompt = f"""## Stage 1 事实抽取结果
+```json
+{facts_summary}
+```
+
+## Stage 2 标准化结果
+```json
+{result_summary}
+```
+
+## 验证差异（如有）
+```json
+{diff_summary}
+```
+
+## LLM复核结果（如有）
+```json
+{review_summary}
+```
+
+## 合同原文摘要
+```
+{contract_snippet}
+```
+
+请只输出“候选学习项”，不要输出正式规则修改。"""
+
+        agent_result = client.call(system_prompt, user_prompt, max_tokens=4096)
+        if agent_result is None:
+            self._send_json({"error": "学习精灵调用失败"}, 500)
+            return
+
+        if not isinstance(agent_result, dict):
+            self._send_json({"error": "学习精灵返回格式异常"}, 500)
+            return
+
+        candidates = agent_result.get("candidates", [])
+        if not isinstance(candidates, list):
+            candidates = []
+            agent_result["candidates"] = candidates
+        for candidate in candidates:
+            if isinstance(candidate, dict):
+                candidate["requires_human_approval"] = True
+                candidate["status"] = "pending_review"
+        agent_result["agent_role"] = "learning_companion"
+        agent_result["summary"] = {
+            "candidate_count": len(candidates),
+            "high_confidence": sum(1 for c in candidates if isinstance(c, dict) and c.get("confidence") == "high"),
+            "needs_business_review": sum(1 for c in candidates if isinstance(c, dict) and c.get("requires_human_approval")),
+        }
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        prov = standardized.get("省", "")
+        city = standardized.get("市", "")
+        location = f"{prov}{city}" if prov and city else "合同"
+        json_path = os.path.join(LEARNING_DIR, f"{timestamp}_{location}_学习候选.json")
+        md_path = os.path.join(LEARNING_DIR, f"{timestamp}_{location}_学习候选.md")
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(agent_result, f, ensure_ascii=False, indent=2)
+
+        lines = [
+            "# 学习精灵候选经验",
+            "",
+            f"- **时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"- **统计**: {json.dumps(agent_result.get('summary', {}), ensure_ascii=False)}",
+            f"- **状态**: 候选记录，仅供人工审核，不参与正式提取",
+            "",
+            "## 候选项",
+            "",
+        ]
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"### {item.get('field', '')}")
+            lines.append(f"- **类型**: {item.get('candidate_type', '')}")
+            lines.append(f"- **置信度**: {item.get('confidence', '')}")
+            lines.append(f"- **目标**: {item.get('target', '')}")
+            lines.append(f"- **状态**: {item.get('status', 'pending_review')}")
+            lines.append(f"- **观察问题**: {item.get('observed_problem', '')}")
+            lines.append(f"- **候选经验**: {item.get('proposed_learning', '')}")
+            lines.append(f"- **依据**: {item.get('evidence', '')}")
+            lines.append(f"- **不自动生效原因**: {item.get('why_not_auto_apply', '')}")
+            lines.append("")
+
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+        self._send_json({
+            "success": True,
+            "learning": agent_result,
+            "json_path": json_path,
+            "md_path": md_path,
+        })
+
+    def _handle_learning_candidate_status(self):
+        """人工标记候选记忆状态。确认也只表示“已确认候选”，不会自动生效。"""
+        body = self._read_body()
+        try:
+            data = json.loads(body)
+        except Exception:
+            self._send_json({"error": "无效数据"}, 400)
+            return
+
+        file_name = os.path.basename(data.get("file_name", ""))
+        status = data.get("status", "")
+        review_note = data.get("review_note", "")
+        allowed_status = {"pending_review", "approved", "rejected", "archived"}
+
+        try:
+            candidate_index = int(data.get("candidate_index", -1))
+        except Exception:
+            candidate_index = -1
+
+        if not file_name.endswith(".json") or not file_name:
+            self._send_json({"error": "候选文件名无效"}, 400)
+            return
+        if status not in allowed_status:
+            self._send_json({"error": "候选状态无效"}, 400)
+            return
+
+        path = os.path.join(LEARNING_DIR, file_name)
+        if not os.path.isfile(path):
+            self._send_json({"error": "候选文件不存在"}, 404)
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                record = json.load(f)
+        except Exception as e:
+            self._send_json({"error": f"候选文件读取失败: {e}"}, 500)
+            return
+
+        candidates = record.get("candidates", [])
+        if not isinstance(candidates, list) or candidate_index < 0 or candidate_index >= len(candidates):
+            self._send_json({"error": "候选项序号无效"}, 400)
+            return
+
+        candidate = candidates[candidate_index]
+        if not isinstance(candidate, dict):
+            self._send_json({"error": "候选项格式无效"}, 400)
+            return
+
+        candidate["status"] = status
+        candidate["review_note"] = review_note
+        candidate["reviewed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        candidate["requires_human_approval"] = True
+        candidate["applied_to_business_logic"] = False
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(record, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._send_json({"error": f"候选文件保存失败: {e}"}, 500)
+            return
+
+        self._send_json({
+            "success": True,
+            "file_name": file_name,
+            "candidate_index": candidate_index,
+            "candidate": candidate,
+            "message": "候选状态已更新，未应用到正式业务逻辑",
+        })
 
     def _handle_llm_review(self):
         """LLM复核：读取合同原文，逐字段验证 AI/参考答案哪个正确"""

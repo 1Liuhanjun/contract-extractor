@@ -161,6 +161,7 @@
                     <button class="report-tab active" onclick="switchReportTab('stage1', this)">📖 事实抽取</button>
                     <button class="report-tab" onclick="switchReportTab('stage2', this)">🔄 标准化映射</button>
                     <button class="report-tab" onclick="switchReportTab('correction', this)">✅ 订正对比</button>
+                    <button class="report-tab" onclick="switchReportTab('learning-agent', this)">🧠 学习精灵</button>
                     <button class="report-tab" onclick="switchReportTab('llm-review', this)">🤖 LLM复核</button>
                 </div>
 
@@ -184,6 +185,22 @@
                     <p class="hint">上传参考答案后可查看AI提取值与参考值的对比。</p>
                     <div id="report-correction-content">
                         <p class="muted">请先上传参考答案进行验证。</p>
+                    </div>
+                </div>
+
+                <!-- 学习精灵 -->
+                <div id="report-learning-agent" class="report-content">
+                    <h3>🧠 学习精灵</h3>
+                    <p class="hint">旁路总结候选业务经验，只保存到候选区；不点击人工确认，不会修改规则库、少样本或正式提取流程。</p>
+                    <div id="learning-agent-results">
+                        <p class="muted">建议在完成验证或LLM复核后运行，这样它能基于差异和复核结论生成更可靠的候选经验。</p>
+                    </div>
+                    <button class="btn btn-primary" onclick="runLearningAgent()" id="btn-learning-agent" style="margin-top:12px">🧠 生成学习建议</button>
+                    <button class="btn btn-secondary" onclick="loadLearningCandidates()" id="btn-load-learning" style="margin-top:12px;margin-left:8px">刷新候选记忆</button>
+                    <div id="learning-agent-status" style="margin-top:8px"></div>
+                    <h4 style="margin:18px 0 8px">候选记忆库</h4>
+                    <div id="learning-memory-list">
+                        <p class="muted">候选经验会保存在 <code>data/learning_candidates/</code>，刷新后可在这里查看与标记。</p>
                     </div>
                 </div>
 
@@ -362,6 +379,7 @@ async function doProcess() {
         // 新合同提取 → 清掉旧合同的订正和复核数据
         window._verifyData = null;
         window._reviewData = null;
+        window._learningAgentData = null;
         log(`✅ 处理完成: ${processResults.length} 份合同\n`);
 
         for (const res of processResults) {
@@ -612,6 +630,8 @@ function showReport() {
     renderMapping();
     // 尝试渲染订正对比
     renderCorrection();
+    if (window._learningAgentData) renderLearningAgent(window._learningAgentData);
+    loadLearningCandidates();
 }
 
 function closeReport() {
@@ -727,6 +747,233 @@ function renderCorrection() {
     container.innerHTML = html;
 }
 
+function collectDiscrepancies() {
+    const discrepancies = [];
+    if (!window._verifyData) return discrepancies;
+    for (const item of window._verifyData.allComparisons) {
+        for (const c of item.comparison.comparisons) {
+            if (c.status.includes('❌') || c.status.includes('⚠️')) {
+                if (c.status.includes('多填') && ['登记日期','项目名称/编号','合同编码','合同名称','联系人','电话','地址','快递单号','钉钉审批单号'].includes(c.field)) {
+                    continue;
+                }
+                discrepancies.push({
+                    field: c.field,
+                    ai_value: c.ai_value,
+                    ref_value: c.ref_value,
+                    status: c.status,
+                });
+            }
+        }
+    }
+    return discrepancies;
+}
+
+// ============================================================
+// 学习精灵 Agent
+// ============================================================
+async function runLearningAgent() {
+    if (!processResults || processResults.length === 0) {
+        showToast('请先完成合同提取', 'warning');
+        return;
+    }
+
+    const proc = processResults[0];
+    if (!proc.result) {
+        showToast('没有有效的提取结果', 'warning');
+        return;
+    }
+
+    const btn = document.getElementById('btn-learning-agent');
+    btn.disabled = true;
+    btn.textContent = '⏳ 总结中...';
+    document.getElementById('learning-agent-status').textContent = '正在生成候选学习经验...';
+
+    const apiKey = document.getElementById('api-key').value;
+
+    try {
+        const r = await fetch('/api/learning-agent', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                facts: proc.facts || {},
+                standardized: proc.result || {},
+                contract_text: proc.contract_text || '',
+                discrepancies: collectDiscrepancies(),
+                llm_review: window._reviewData || [],
+                api_key: apiKey || undefined,
+                api_provider: document.getElementById('api-provider').value,
+            })
+        });
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error);
+
+        window._learningAgentData = d.learning;
+        renderLearningAgent(d.learning);
+        loadLearningCandidates();
+        document.getElementById('learning-agent-status').textContent = `✅ 候选经验已保存到 data/learning_candidates/，未修改正式规则`;
+        showToast('学习精灵已生成候选经验', 'success');
+
+        const agentTab = document.querySelector('.report-tab[onclick*="learning-agent"]');
+        if (agentTab) switchReportTab('learning-agent', agentTab);
+
+    } catch (e) {
+        document.getElementById('learning-agent-status').textContent = `❌ 生成失败: ${e.message}`;
+        showToast(`学习精灵失败: ${e.message}`, 'error');
+    }
+
+    btn.disabled = false;
+    btn.textContent = '🧠 生成学习建议';
+}
+
+function renderLearningAgent(learning) {
+    const container = document.getElementById('learning-agent-results');
+    if (!learning || typeof learning !== 'object') {
+        container.innerHTML = '<p class="muted">暂无学习候选。</p>';
+        return;
+    }
+
+    const summary = learning.summary || {};
+    const candidates = Array.isArray(learning.candidates) ? learning.candidates : [];
+
+    let html = `
+        <div class="summary-bar">
+            <span class="summary-item">候选项: ${summary.candidate_count || 0}</span>
+            <span class="summary-item green">高置信: ${summary.high_confidence || 0}</span>
+            <span class="summary-item red">待人工审核: ${summary.needs_business_review || 0}</span>
+        </div>
+        <p class="hint">这些内容只保存在候选区，不会进入 <code>field_knowledge_base.py</code>、<code>few_shot_examples.py</code> 或正式提取 prompt。</p>
+    `;
+
+    if (candidates.length === 0) {
+        html += '<p class="muted">没有生成候选经验，可能是证据不足或本次差异不足以沉淀规则。</p>';
+        container.innerHTML = html;
+        return;
+    }
+
+    for (const item of candidates) {
+        const confidenceClass = item.confidence === 'high' ? 'badge-risk-low' : item.confidence === 'medium' ? 'badge-risk-medium' : 'badge-other';
+        html += `<div class="review-item">
+            <div class="review-field">📌 ${escapeHtml(item.field || '')}
+                <span class="review-badge ${confidenceClass}">${escapeHtml(item.confidence || '')}</span>
+                <span class="review-badge badge-other">${escapeHtml(item.candidate_type || '')}</span>
+                <span class="review-badge badge-ref">${escapeHtml(item.status || 'pending_review')}</span>
+            </div>
+            <div class="review-diff">
+                <span class="diff-ai">目标: ${escapeHtml(item.target || 'none')}</span>
+                <span class="diff-ref">需人工确认: ${item.requires_human_approval ? '是' : '否'}</span>
+            </div>
+            <div class="contract-clause"><strong>观察问题</strong>: ${escapeHtml(item.observed_problem || '')}</div>
+            <div class="contract-clause quote"><strong>候选经验</strong>: ${escapeHtml(item.proposed_learning || '')}</div>
+            ${item.evidence ? `<div class="contract-clause">📄 <strong>依据</strong>: ${escapeHtml(item.evidence)}</div>` : ''}
+            <div class="review-explanation">🔒 <strong>不自动生效</strong>: ${escapeHtml(item.why_not_auto_apply || '候选经验必须人工审核后才可进入正式规则。')}</div>
+        </div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+async function loadLearningCandidates() {
+    const container = document.getElementById('learning-memory-list');
+    if (!container) return;
+
+    container.innerHTML = '<p class="muted">正在读取候选记忆库...</p>';
+    try {
+        const r = await fetch('/api/learning-candidates');
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error || '读取失败');
+        window._learningMemoryRecords = d.records || [];
+        renderLearningMemoryList(window._learningMemoryRecords);
+    } catch (e) {
+        container.innerHTML = `<p class="muted">候选记忆库读取失败: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function renderLearningMemoryList(records) {
+    const container = document.getElementById('learning-memory-list');
+    if (!container) return;
+
+    if (!records || records.length === 0) {
+        container.innerHTML = '<p class="muted">暂无候选记忆。运行学习精灵后，这里会出现待人工审核的经验项。</p>';
+        return;
+    }
+
+    let html = '';
+    for (const record of records) {
+        const candidates = Array.isArray(record.candidates) ? record.candidates : [];
+        const summary = record.summary || {};
+        html += `<div class="review-item">
+            <div class="review-field">📁 ${escapeHtml(record.file_name || '')}</div>
+            <div class="review-diff">
+                <span class="diff-ai">时间: ${escapeHtml(record.created_at || '')}</span>
+                <span class="diff-ref">候选项: ${summary.candidate_count || candidates.length || 0}</span>
+            </div>
+        </div>`;
+
+        if (candidates.length === 0) {
+            html += '<p class="muted">这个记录没有候选项。</p>';
+            continue;
+        }
+
+        candidates.forEach((item, index) => {
+            const status = item.status || 'pending_review';
+            const confidenceClass = item.confidence === 'high' ? 'badge-risk-low' : item.confidence === 'medium' ? 'badge-risk-medium' : 'badge-other';
+            const statusClass = status === 'approved' ? 'badge-ai' : status === 'rejected' ? 'badge-none' : status === 'archived' ? 'badge-other' : 'badge-ref';
+            const encodedFile = encodeURIComponent(record.file_name || '');
+            html += `<div class="review-item" style="margin-left:12px">
+                <div class="review-field">📌 ${escapeHtml(item.field || '')}
+                    <span class="review-badge ${confidenceClass}">${escapeHtml(item.confidence || '')}</span>
+                    <span class="review-badge ${statusClass}">${escapeHtml(status)}</span>
+                </div>
+                <div class="review-diff">
+                    <span class="diff-ai">类型: ${escapeHtml(item.candidate_type || '')}</span>
+                    <span class="diff-ref">目标: ${escapeHtml(item.target || 'none')}</span>
+                </div>
+                <div class="contract-clause"><strong>候选经验</strong>: ${escapeHtml(item.proposed_learning || '')}</div>
+                ${item.evidence ? `<div class="contract-clause quote"><strong>依据</strong>: ${escapeHtml(item.evidence)}</div>` : ''}
+                ${item.review_note ? `<div class="review-explanation">📝 <strong>人工备注</strong>: ${escapeHtml(item.review_note)}</div>` : ''}
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+                    <button class="btn btn-secondary btn-sm" onclick="updateLearningCandidateStatus('${encodedFile}', ${index}, 'approved')">标记已确认</button>
+                    <button class="btn btn-secondary btn-sm" onclick="updateLearningCandidateStatus('${encodedFile}', ${index}, 'rejected')">驳回</button>
+                    <button class="btn btn-secondary btn-sm" onclick="updateLearningCandidateStatus('${encodedFile}', ${index}, 'archived')">归档</button>
+                    <button class="btn btn-secondary btn-sm" onclick="updateLearningCandidateStatus('${encodedFile}', ${index}, 'pending_review')">退回待审</button>
+                </div>
+                <p class="hint" style="margin-top:6px">状态标记只更新候选记忆，不会应用到正式业务规则。</p>
+            </div>`;
+        });
+    }
+
+    container.innerHTML = html;
+}
+
+async function updateLearningCandidateStatus(encodedFileName, candidateIndex, status) {
+    const fileName = decodeURIComponent(encodedFileName);
+    const noteMap = {
+        approved: '人工确认该候选有参考价值，但尚未应用到正式规则',
+        rejected: '人工驳回，不进入正式规则',
+        archived: '已归档，仅保留记录',
+        pending_review: '退回待人工审核',
+    };
+
+    try {
+        const r = await fetch('/api/learning-candidate-status', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                file_name: fileName,
+                candidate_index: candidateIndex,
+                status: status,
+                review_note: noteMap[status] || '',
+            })
+        });
+        const d = await r.json();
+        if (!d.success) throw new Error(d.error || '状态更新失败');
+        showToast('候选状态已更新，正式规则未改变', 'success');
+        loadLearningCandidates();
+    } catch (e) {
+        showToast(`候选状态更新失败: ${e.message}`, 'error');
+    }
+}
+
 // ============================================================
 // LLM复核
 // ============================================================
@@ -742,22 +989,7 @@ async function runLLMReview() {
     document.getElementById('review-status').textContent = '正在调用LLM分析差异原因...';
 
     // 收集所有差异字段
-    const discrepancies = [];
-    for (const item of window._verifyData.allComparisons) {
-        for (const c of item.comparison.comparisons) {
-            if (c.status.includes('❌') || c.status.includes('⚠️')) {
-                // 排除标红字段的"多填"（正常的）
-                if (c.status.includes('多填') && ['登记日期','项目名称/编号','合同编码','合同名称','联系人','电话','地址','快递单号','钉钉审批单号'].includes(c.field)) {
-                    continue;
-                }
-                discrepancies.push({
-                    field: c.field,
-                    ai_value: c.ai_value,
-                    ref_value: c.ref_value,
-                });
-            }
-        }
-    }
+    const discrepancies = collectDiscrepancies();
 
     if (discrepancies.length === 0) {
         document.getElementById('review-status').textContent = '✅ 没有发现差异，无需复核';
@@ -790,6 +1022,7 @@ async function runLLMReview() {
         const d = await r.json();
         if (!d.success) throw new Error(d.error);
 
+        window._reviewData = d.review;
         renderLLMReview(d.review);
         document.getElementById('review-status').textContent = '✅ 复核完成';
         showToast('LLM复核完成！', 'success');
