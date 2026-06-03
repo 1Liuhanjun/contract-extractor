@@ -39,10 +39,12 @@ except ImportError:
 UPLOAD_DIR = os.path.join(PROJECT_DIR, "data/uploads")
 REVIEWS_DIR = os.path.join(PROJECT_DIR, "data/reviews")
 RESULTS_DIR = os.path.join(PROJECT_DIR, "data/results")
-CUMULATIVE_EXCEL = os.path.join(RESULTS_DIR, os.path.join("data", "results", "合同提取汇总.xlsx"))
+OCR_TEXT_DIR = os.path.join(PROJECT_DIR, "data/ocr_texts")
+CUMULATIVE_EXCEL = os.path.join(RESULTS_DIR, "合同提取汇总.xlsx")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REVIEWS_DIR, exist_ok=True)
 os.makedirs(RESULTS_DIR, exist_ok=True)
+os.makedirs(OCR_TEXT_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -54,7 +56,8 @@ def process_contract(file_path, api_key, api_provider="anthropic"):
     from stage2_standardizer import standardize_fields
     from few_shot_examples import get_all_examples
 
-    text = _load_text(file_path)
+    load_meta = {}
+    text = _load_text(file_path, metadata=load_meta)
     if text is None or len(text) < 50:
         return {"error": "文件内容过短或无法读取"}
 
@@ -181,10 +184,31 @@ def process_contract(file_path, api_key, api_provider="anthropic"):
         if f in standardized and standardized[f] in (None, "", "null", "None"):
             standardized[f] = "/"
 
-    return {"facts": facts, "result": standardized, "file_name": os.path.basename(file_path), "contract_text": text}
+    response = {"facts": facts, "result": standardized, "file_name": os.path.basename(file_path), "contract_text": text}
+    if load_meta.get("ocr"):
+        response["ocr"] = load_meta["ocr"]
+    return response
 
 
-def _load_text(file_path):
+def _load_text(file_path, metadata=None):
+    if file_path.lower().endswith('.pdf'):
+        try:
+            from ocr_client import PaddleOCRClient
+            client = PaddleOCRClient()
+            print(f"  [OCR] PDF 文件，开始调用 PaddleOCR: {os.path.basename(file_path)}")
+            ocr_result = client.extract_text_from_file(file_path, save_dir=OCR_TEXT_DIR)
+            if metadata is not None:
+                metadata["ocr"] = {
+                    "job_id": ocr_result.get("job_id"),
+                    "model": ocr_result.get("model"),
+                    "saved_text_path": ocr_result.get("saved_text_path"),
+                    "saved_jsonl_path": ocr_result.get("saved_jsonl_path"),
+                }
+            return ocr_result.get("text", "")
+        except Exception as e:
+            print(f"  [OCR错误] PDF 转文本失败: {e}")
+            return None
+
     if file_path.endswith('.docx'):
         try:
             import zipfile
@@ -543,7 +567,7 @@ class ContractHandler(BaseHTTPRequestHandler):
     def _serve_static(self):
         path = urlparse(self.path).path  # e.g. /static/style.css
         filename = path[len("/static/"):]
-        filepath = os.path.join(PROJECT_DIR, "static", filename)
+        filepath = os.path.join(PROJECT_DIR, "web", "static", filename)
         if os.path.exists(filepath):
             mime, _ = mimetypes.guess_type(filepath)
             with open(filepath, "rb") as f:
@@ -557,7 +581,7 @@ class ContractHandler(BaseHTTPRequestHandler):
             self._send_json({"error": f"File not found: {filename}"}, 404)
 
     def _list_files(self):
-        files = [f for f in os.listdir(UPLOAD_DIR) if f.endswith((".txt", ".docx"))]
+        files = [f for f in os.listdir(UPLOAD_DIR) if f.lower().endswith((".txt", ".docx", ".pdf"))]
         self._send_json({"files": files})
 
     # ---- POST ----
@@ -606,6 +630,8 @@ class ContractHandler(BaseHTTPRequestHandler):
         files = parse_multipart(body, ct)
         saved = []
         for f in files:
+            if not f["filename"].lower().endswith((".txt", ".docx", ".pdf")):
+                continue
             save_path = os.path.join(UPLOAD_DIR, f["filename"])
             with open(save_path, "wb") as out:
                 out.write(f["content"])
@@ -639,10 +665,11 @@ class ContractHandler(BaseHTTPRequestHandler):
                 return
 
         file_list = data.get("files", os.listdir(UPLOAD_DIR))
-        file_list = [f for f in file_list if f.endswith((".txt", ".docx"))]
+        file_list = [f for f in file_list if f.lower().endswith((".txt", ".docx", ".pdf"))]
 
         if not file_list:
             self._send_json({"error": "没有可处理的文件"}, 400)
+            return
 
         results = []
         for fname in file_list:
@@ -675,7 +702,7 @@ class ContractHandler(BaseHTTPRequestHandler):
 
         try:
             from excel_writer import write_results
-            output_path = os.path.join(PROJECT_DIR, os.path.join(PROJECT_DIR, "data", "_temp_export.xlsx"))
+            output_path = os.path.join(PROJECT_DIR, "data", "_temp_export.xlsx")
             write_results(standardized_list, output_path)
 
             with open(output_path, "rb") as f:
@@ -889,7 +916,7 @@ class ContractHandler(BaseHTTPRequestHandler):
         if not contract_text:
             # fallback：从 _uploads/ 读取
             for fname in os.listdir(UPLOAD_DIR):
-                if fname.endswith((".txt", ".docx")):
+                if fname.lower().endswith((".txt", ".docx", ".pdf")):
                     try:
                         text = _load_text(os.path.join(UPLOAD_DIR, fname))
                         if text and len(text) > 100:

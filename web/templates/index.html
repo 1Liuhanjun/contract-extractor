@@ -11,7 +11,7 @@
 <div class="app-container">
     <header>
         <h1>📄 合同字段提取系统</h1>
-        <p class="subtitle">Stage 1: 事实抽取 → Stage 2: 标准化映射 → Excel | 累积文件: <code>_results/合同提取汇总.xlsx</code></p>
+        <p class="subtitle">Stage 1: 事实抽取 → Stage 2: 标准化映射 → Excel | 累积文件: <code>data/results/合同提取汇总.xlsx</code></p>
     </header>
 
     <!-- API 配置 -->
@@ -57,9 +57,9 @@
                      ondragleave="this.classList.remove('dragover')"
                      ondrop="event.preventDefault(); this.classList.remove('dragover'); handleDrop(event)">
                     <div class="drop-icon">📄</div>
-                    <p>拖拽 .docx / .txt 文件到此处</p>
+                    <p>拖拽 .pdf / .docx / .txt 文件到此处</p>
                     <p class="drop-hint">或点击按钮选择文件</p>
-                    <input type="file" id="file-input" multiple accept=".docx,.txt" style="display:none" onchange="handleSelect(event)">
+                    <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt" style="display:none" onchange="handleSelect(event)">
                     <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">选择文件</button>
                 </div>
                 <div id="file-list"></div>
@@ -142,8 +142,8 @@
         <section class="card">
             <div class="card-header">📋 复盘报告</div>
             <div class="card-body">
-                <p class="hint">复盘报告保存在 <code>_reviews/</code> 文件夹中，<strong>不会更新到程序代码里</strong>。</p>
-                <p class="hint">每次生成复盘后，用 PyCharm 或 Finder 打开 <code>_reviews/</code> 目录查看。</p>
+                <p class="hint">复盘报告保存在 <code>data/reviews/</code> 文件夹中，<strong>不会更新到程序代码里</strong>。</p>
+                <p class="hint">每次生成复盘后，用 PyCharm 或 Finder 打开 <code>data/reviews/</code> 目录查看。</p>
                 <div id="review-list"><p class="muted">暂无复盘报告。完成提取→验证后可生成。</p></div>
             </div>
         </section>
@@ -237,6 +237,11 @@ function escapeHtml(str) {
     return d.innerHTML;
 }
 
+function isSupportedContractFile(name) {
+    const lower = name.toLowerCase();
+    return lower.endsWith('.pdf') || lower.endsWith('.docx') || lower.endsWith('.txt');
+}
+
 function switchTab(tab) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
     document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -256,7 +261,7 @@ const pendingFiles = [];
 
 function handleDrop(e) {
     for (const f of e.dataTransfer.files) {
-        if (f.name.endsWith('.docx') || f.name.endsWith('.txt')) pendingFiles.push(f);
+        if (isSupportedContractFile(f.name)) pendingFiles.push(f);
         else showToast(`不支持: ${f.name}`, 'warning');
     }
     renderPending();
@@ -264,7 +269,7 @@ function handleDrop(e) {
 
 function handleSelect(e) {
     for (const f of e.target.files) {
-        if (f.name.endsWith('.docx') || f.name.endsWith('.txt')) pendingFiles.push(f);
+        if (isSupportedContractFile(f.name)) pendingFiles.push(f);
         else showToast(`不支持: ${f.name}`, 'warning');
     }
     e.target.value = '';
@@ -320,7 +325,7 @@ async function shutdown() {
     if (!confirm('确认退出？累积 Excel 已自动保存，关闭后需在 PyCharm 终端重新启动。')) return;
     showToast('正在关闭服务器...', 'info');
     try { await fetch('/api/shutdown', { method: 'POST' }); } catch (e) {}
-    document.body.innerHTML = '<div style="text-align:center;padding:100px 20px"><h2>👋 服务器已关闭</h2><p>累积结果: <code>_results/合同提取汇总.xlsx</code></p><p style="color:#9CA3AF">可以关闭此页面和 PyCharm 终端了</p></div>';
+    document.body.innerHTML = '<div style="text-align:center;padding:100px 20px"><h2>👋 服务器已关闭</h2><p>累积结果: <code>data/results/合同提取汇总.xlsx</code></p><p style="color:#9CA3AF">可以关闭此页面和 PyCharm 终端了</p></div>';
 }
 
 // ============================================================
@@ -339,6 +344,9 @@ async function doProcess() {
     log(`   文件: ${uploadedFileNames.join(', ')}`);
     log('');
     log('🔧 正在提取 (Stage 1 → Stage 2)...');
+    if (uploadedFileNames.some(name => name.toLowerCase().endsWith('.pdf'))) {
+        log('   PDF 会先自动调用 PaddleOCR-VL-1.5 转成 Markdown 文本');
+    }
     log('   调用LLM可能需要30-60秒，请耐心等待...');
 
     try {
@@ -588,7 +596,7 @@ async function generateReview() {
     }
 
     // 刷新复盘Tab
-    document.getElementById('review-list').innerHTML = `<p class="hint">复盘报告已保存到 <code>_reviews/</code> 目录。</p>`;
+    document.getElementById('review-list').innerHTML = `<p class="hint">复盘报告已保存到 <code>data/reviews/</code> 目录。</p>`;
 }
 
 // ============================================================
