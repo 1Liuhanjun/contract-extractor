@@ -2,7 +2,7 @@
 .env
 
 # 运行时私有数据
-data/
+/data/
 
 # IDE
 .idea/
