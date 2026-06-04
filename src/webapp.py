@@ -437,7 +437,25 @@ def process_contract(file_path, api_key, api_provider="deepseek-v4-pro"):
         if f in standardized and standardized[f] in (None, "", "null", "None"):
             standardized[f] = "/"
 
+    appendix_result = None
+    try:
+        from src_appendix.appendix_extractor import extract_appendix
+        appendix_llm = LLMClient(provider=api_provider, api_key=api_key)
+        appendix_result = extract_appendix(text, appendix_llm)
+        print(f"  [附表] 已提取 {appendix_result.get('row_count', 0)} 行线路明细")
+    except Exception as e:
+        appendix_result = {
+            "success": False,
+            "found": False,
+            "row_count": 0,
+            "rows": [],
+            "error": str(e),
+            "warnings": [f"附表提取失败: {e}"],
+        }
+        print(f"  [附表错误] {e}")
+
     response = {"facts": facts, "result": standardized, "file_name": os.path.basename(file_path), "contract_text": text}
+    response["appendix"] = appendix_result
     if load_meta.get("ocr"):
         response["ocr"] = load_meta["ocr"]
     return response
@@ -494,38 +512,12 @@ def _load_text(file_path, metadata=None):
         return None
 
 
-def _append_to_cumulative(standardized_list):
+def _append_to_cumulative(standardized_list, appendix_results_list=None):
     """将提取结果追加到累积 Excel，不覆盖已有行"""
-    from excel_writer import write_results
-    from field_knowledge_base import EXCEL_HEADERS
+    from excel_writer import append_results
 
-    if not os.path.exists(CUMULATIVE_EXCEL):
-        write_results(standardized_list, CUMULATIVE_EXCEL)
-        print(f"  📊 创建累积 Excel: {CUMULATIVE_EXCEL}")
-        return
-
-    from openpyxl import load_workbook
-    from openpyxl.styles import Alignment, Border, Side
-
-    thin_border = Border(
-        left=Side(style='thin'), right=Side(style='thin'),
-        top=Side(style='thin'), bottom=Side(style='thin')
-    )
-    wb = load_workbook(CUMULATIVE_EXCEL)
-    ws = wb.active
-    start_row = ws.max_row + 1
-
-    for idx, std in enumerate(standardized_list):
-        row_num = start_row + idx
-        for col_idx, header in enumerate(EXCEL_HEADERS, 1):
-            raw = std.get(header, "")
-            val = "" if raw in (None, "", "null") else str(raw)
-            cell = ws.cell(row=row_num, column=col_idx, value=val)
-            cell.alignment = Alignment(vertical="center", wrap_text=(len(val) > 20))
-            cell.border = thin_border
-
-    wb.save(CUMULATIVE_EXCEL)
-    print(f"  📊 已追加 {len(standardized_list)} 行到累积 Excel (共 {start_row + len(standardized_list) - 2} 行数据)")
+    append_results(CUMULATIVE_EXCEL, standardized_list, appendix_results_list=appendix_results_list)
+    print(f"  📊 已更新累积 Excel: {CUMULATIVE_EXCEL}")
 
 
 def _is_numeric_equivalent(a, b):
@@ -988,7 +980,8 @@ class ContractHandler(BaseHTTPRequestHandler):
         # 自动追加到累积 Excel
         standardized_list = [r["result"] for r in results if "result" in r and r["result"]]
         if standardized_list:
-            _append_to_cumulative(standardized_list)
+            appendix_results_list = [r.get("appendix") for r in results if "result" in r and r["result"]]
+            _append_to_cumulative(standardized_list, appendix_results_list)
 
         self._send_json({"success": True, "results": results})
 
@@ -1002,6 +995,7 @@ class ContractHandler(BaseHTTPRequestHandler):
 
         results = data.get("results", [])
         standardized_list = [r["result"] for r in results if "result" in r and r["result"]]
+        appendix_results_list = [r.get("appendix") for r in results if "result" in r and r["result"]]
 
         if not standardized_list:
             self._send_json({"error": "没有有效的结果"}, 400)
@@ -1010,7 +1004,7 @@ class ContractHandler(BaseHTTPRequestHandler):
         try:
             from excel_writer import write_results
             output_path = os.path.join(PROJECT_DIR, "data", "_temp_export.xlsx")
-            write_results(standardized_list, output_path)
+            write_results(standardized_list, output_path, appendix_results_list=appendix_results_list)
 
             with open(output_path, "rb") as f:
                 excel_data = f.read()

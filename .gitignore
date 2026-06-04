@@ -12,3 +12,9 @@ data/
 __pycache__/
 *.pyc
 *.pyo
+/docs/CLAUDE.md
+/docs/Memory架构设计.md
+/docs/合同差异确认清单.md
+/docs/字段提取业务规则手册.md
+/docs/简历与面试包装指南.md
+/docs/面试项目讲解.md

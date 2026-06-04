@@ -84,7 +84,14 @@
                 <span>📊 提取结果</span>
                 <button class="btn btn-info btn-sm" onclick="showReport()">📋 生成报告</button>
             </div>
-            <div class="card-body"><div id="result-table-wrapper" class="table-wrapper"></div></div>
+            <div class="card-body">
+                <h4 style="margin:0 0 8px">主表</h4>
+                <div id="result-table-wrapper" class="table-wrapper"></div>
+                <h4 style="margin:18px 0 8px">附表</h4>
+                <div id="appendix-table-wrapper" class="table-wrapper">
+                    <p class="muted">附表线路明细会在提取完成后显示。</p>
+                </div>
+            </div>
         </section>
     </div>
 
@@ -427,6 +434,13 @@ async function doProcess() {
             const fields = res.result || {};
             const filled = Object.entries(fields).filter(([,v]) => v && v !== '' && v !== 'null').length;
             log(`    ✅ 提取到 ${filled} 个字段`);
+            if (res.appendix) {
+                if (res.appendix.success === false) {
+                    log(`    ⚠️ 附表提取失败: ${res.appendix.error || '未知错误'}`);
+                } else {
+                    log(`    📎 附表提取到 ${res.appendix.row_count || 0} 行`);
+                }
+            }
 
             const core = ['客户分类','业务类型','合同类型','客户名称','合同主体','合同开始时间','合同结束时间','账期（天）','保证金（万元）','税率','是否有旺季补偿','补偿比例','是否有油价联动'];
             for (const k of core) {
@@ -435,6 +449,7 @@ async function doProcess() {
         }
 
         renderResultTable(processResults);
+        renderAppendixTable(processResults);
         document.getElementById('result-section').style.display = 'block';
         document.getElementById('result-section').scrollIntoView({ behavior: 'smooth' });
         showToast('提取完成！已追加到累积Excel', 'success');
@@ -460,15 +475,62 @@ function renderResultTable(results) {
         '合同开始时间','合同结束时间','合同预警提醒',  // 合同预警=代码生成
         '账期（天）','保证金（万元）','税率','是否有旺季补偿','补偿比例','是否有油价联动','油价基准(元/升）'];
 
-    let html = '<table class="result-table"><thead><tr><th>文件</th>';
+    let html = '<table class="result-table"><thead><tr><th>文件</th><th>附表行数</th>';
     for (const f of coreFields) html += `<th>${f}</th>`;
     html += '</tr></thead><tbody>';
 
     for (const r of results) {
-        html += `<tr><td class="file-cell">${r.file_name}</td>`;
+        const appendixCount = r.appendix?.row_count ?? 0;
+        html += `<tr><td class="file-cell">${r.file_name}</td><td>${appendixCount}</td>`;
         for (const f of coreFields) {
             let v = r.result?.[f];
             v = (v === null || v === undefined || v === '' || v === 'null') ? '—' : String(v).substring(0, 40);
+            html += `<td>${escapeHtml(v)}</td>`;
+        }
+        html += '</tr>';
+    }
+    html += '</tbody></table>';
+    w.innerHTML = html;
+}
+
+function renderAppendixTable(results) {
+    const w = document.getElementById('appendix-table-wrapper');
+    if (!w) return;
+
+    const rows = [];
+    for (const r of results || []) {
+        const appendixRows = r.appendix?.rows || [];
+        for (const row of appendixRows) {
+            rows.push({ file_name: r.file_name, ...row });
+        }
+    }
+
+    if (rows.length === 0) {
+        const messages = [];
+        for (const r of results || []) {
+            if (r.appendix?.error) messages.push(`${r.file_name}: ${r.appendix.error}`);
+            for (const msg of (r.appendix?.warnings || [])) messages.push(`${r.file_name}: ${msg}`);
+        }
+        w.innerHTML = messages.length
+            ? `<p class="muted">本次没有可展示的附表行。</p><pre class="log-box">${escapeHtml(messages.join('\n'))}</pre>`
+            : '<p class="muted">本次没有提取到附表线路明细。</p>';
+        return;
+    }
+
+    const headers = ['文件','省','市','业务类型','分包号','线路名称','邮路性质','里程',
+        '2.75吨/3吨','5吨','4.2米','8吨','12吨/9.6米','15吨','20吨/12.5',
+        '25吨','30吨、17.5','40吨A','有效期开始时间','有效期结束时间','公司主体'];
+
+    let html = '<table class="result-table"><thead><tr>';
+    for (const h of headers) html += `<th>${h}</th>`;
+    html += '</tr></thead><tbody>';
+
+    for (const row of rows) {
+        html += '<tr>';
+        for (const h of headers) {
+            const key = h === '文件' ? 'file_name' : h;
+            let v = row[key];
+            v = (v === null || v === undefined || v === '' || v === 'null') ? '—' : String(v).substring(0, 60);
             html += `<td>${escapeHtml(v)}</td>`;
         }
         html += '</tr>';
