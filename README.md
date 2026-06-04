@@ -250,6 +250,12 @@ __pycache__/
 ```text
 src/
 Addition/               # 附表子项目源码必须提交
+Addition/config.yaml
+Addition/field_map.yaml
+Addition/companies/
+Addition/data/__init__.py
+Addition/data/geo.py
+Addition/templates/合同台账表_新(3).xlsx
 web/
 requirements.txt
 .env.example
@@ -257,6 +263,28 @@ README.md
 ```
 
 如果别人 clone 后缺少 `Addition/`，则附表提取无法运行。
+
+附表项目的高频漏提交文件：
+
+```text
+Addition/data/geo.py
+Addition/templates/合同台账表_新(3).xlsx
+Addition/companies/youzheng.md
+Addition/companies/ledger.md
+Addition/field_map.yaml
+```
+
+其中 `Addition/templates/合同台账表_新(3).xlsx` 是写附表 Excel 时复制的模板，缺失会报：
+
+```text
+FileNotFoundError: ... Addition/templates/合同台账表_新(3).xlsx
+```
+
+`Addition/data/geo.py` 是省市校验词典，缺失会报：
+
+```text
+No module named data
+```
 
 ## 九、推荐测试流程
 

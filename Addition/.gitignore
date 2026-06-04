@@ -7,6 +7,7 @@ output/
 __pycache__/
 *.pyc
 .pytest_cache/
+*.bak
 
 # —— 用户投入的待处理文件（按需，避免把测试合同当源码）——
 # input/*.pdf
