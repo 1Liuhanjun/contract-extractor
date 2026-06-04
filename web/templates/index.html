@@ -31,7 +31,7 @@
                     <select id="api-provider">
                         <option value="anthropic">Anthropic Claude</option>
                         <option value="deepseek">DeepSeek</option>
-                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+                        <option value="deepseek-v4-pro" selected>DeepSeek V4 Pro</option>
                         <option value="openai">OpenAI</option>
                     </select>
                 </div>
@@ -58,14 +58,14 @@
                      ondrop="event.preventDefault(); this.classList.remove('dragover'); handleDrop(event)">
                     <div class="drop-icon">📄</div>
                     <p>拖拽 .pdf / .docx / .txt 文件到此处</p>
-                    <p class="drop-hint">或点击按钮选择文件</p>
+                    <p class="drop-hint">选择后自动上传并开始提取</p>
                     <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt" style="display:none" onchange="handleSelect(event)">
                     <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">选择文件</button>
                 </div>
                 <div id="file-list"></div>
                 <div class="actions">
-                    <button class="btn btn-primary" onclick="doUpload()" id="btn-upload">📤 上传到服务器</button>
-                    <button class="btn btn-primary" onclick="doProcess()" id="btn-process" disabled>🚀 开始提取</button>
+                    <button class="btn btn-primary" onclick="doUpload()" id="btn-upload" style="display:none">📤 上传到服务器</button>
+                    <button class="btn btn-primary" onclick="doProcess()" id="btn-process" style="display:none" disabled>🚀 开始提取</button>
                     <button class="btn btn-danger" onclick="clearAll()">🗑️ 清空</button>
                     <button class="btn btn-danger" onclick="shutdown()" style="background:var(--danger);margin-left:auto">🚪 退出</button>
                 </div>
@@ -275,22 +275,34 @@ function toggleSection(id) {
 // 文件上传
 // ============================================================
 const pendingFiles = [];
+let isAutoProcessing = false;
 
 function handleDrop(e) {
+    if (isAutoProcessing) {
+        showToast('当前文件正在处理中，请稍候', 'warning');
+        return;
+    }
     for (const f of e.dataTransfer.files) {
         if (isSupportedContractFile(f.name)) pendingFiles.push(f);
         else showToast(`不支持: ${f.name}`, 'warning');
     }
     renderPending();
+    autoUploadAndProcess();
 }
 
 function handleSelect(e) {
+    if (isAutoProcessing) {
+        showToast('当前文件正在处理中，请稍候', 'warning');
+        e.target.value = '';
+        return;
+    }
     for (const f of e.target.files) {
         if (isSupportedContractFile(f.name)) pendingFiles.push(f);
         else showToast(`不支持: ${f.name}`, 'warning');
     }
     e.target.value = '';
     renderPending();
+    autoUploadAndProcess();
 }
 
 function renderPending() {
@@ -308,20 +320,46 @@ function removePending(i) {
 }
 
 async function doUpload() {
-    if (pendingFiles.length === 0) { showToast('请先选择文件', 'warning'); return; }
+    if (pendingFiles.length === 0) { showToast('请先选择文件', 'warning'); return false; }
     const fd = new FormData();
     for (const f of pendingFiles) fd.append('file', f);
     try {
         const r = await fetch('/api/upload', { method: 'POST', body: fd });
         const d = await r.json();
         if (!d.success) throw new Error(d.error);
-        uploadedFileNames = [...uploadedFileNames, ...d.files];
+        uploadedFileNames = d.files || [];
         pendingFiles.length = 0;
         renderPending();
         document.getElementById('btn-process').disabled = false;
         showToast(`上传成功: ${d.files.join(', ')}`, 'success');
+        return uploadedFileNames.length > 0;
     } catch (e) {
         showToast(`上传失败: ${e.message}`, 'error');
+        return false;
+    }
+}
+
+async function autoUploadAndProcess() {
+    if (isAutoProcessing || pendingFiles.length === 0) return;
+    isAutoProcessing = true;
+    const fileInput = document.getElementById('file-input');
+    const uploadBtn = document.getElementById('btn-upload');
+    const processBtn = document.getElementById('btn-process');
+    fileInput.disabled = true;
+    uploadBtn.disabled = true;
+    processBtn.disabled = true;
+
+    try {
+        document.getElementById('log-section').style.display = 'block';
+        document.getElementById('log-output').textContent = '';
+        log('📥 已选择文件，自动上传并开始提取...');
+        const uploaded = await doUpload();
+        if (uploaded) await doProcess();
+    } finally {
+        isAutoProcessing = false;
+        fileInput.disabled = false;
+        uploadBtn.disabled = false;
+        processBtn.disabled = uploadedFileNames.length === 0;
     }
 }
 
@@ -349,8 +387,9 @@ async function shutdown() {
 // 提取处理
 // ============================================================
 async function doProcess() {
-    if (uploadedFileNames.length === 0) { showToast('请先上传文件', 'warning'); return; }
+    if (uploadedFileNames.length === 0) { showToast('请先上传文件', 'warning'); return false; }
     const apiKey = document.getElementById('api-key').value;
+    let ok = false;
 
     document.getElementById('btn-process').disabled = true;
     document.getElementById('btn-process').textContent = '⏳ 处理中...';
@@ -399,6 +438,7 @@ async function doProcess() {
         document.getElementById('result-section').style.display = 'block';
         document.getElementById('result-section').scrollIntoView({ behavior: 'smooth' });
         showToast('提取完成！已追加到累积Excel', 'success');
+        ok = true;
 
     } catch (e) {
         log(`\n❌ 错误: ${e.message}`);
@@ -407,6 +447,7 @@ async function doProcess() {
 
     document.getElementById('btn-process').disabled = false;
     document.getElementById('btn-process').textContent = '🚀 开始提取';
+    return ok;
 }
 
 function renderResultTable(results) {

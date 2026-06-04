@@ -150,7 +150,190 @@ def _calculate_warning_days(end_date_value):
     return str((end_date - date.today()).days)
 
 
-def process_contract(file_path, api_key, api_provider="anthropic"):
+def _clean_route_name(route_text):
+    """清洗线路名：北京黄村-广州(京1) -> 北京黄村-广州。"""
+    text = re.sub(r"<[^>]+>", "", str(route_text or ""))
+    text = text.replace("—", "-").replace("－", "-").replace("–", "-")
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[（(][^）)]{0,20}[）)]$", "", text)
+    return text.strip("，,。；;：:")
+
+
+def _looks_like_route_name(text):
+    if not text:
+        return False
+    if len(text) > 40:
+        return False
+    if not re.search(r"[\u4e00-\u9fa5]", text):
+        return False
+    if not any(sep in text for sep in ["-", "至", "到"]):
+        return False
+    parts = re.split(r"[-至到]", text, maxsplit=1)
+    if len(parts) != 2 or not all(re.search(r"[\u4e00-\u9fa5]", part) for part in parts):
+        return False
+    bad_words = ["邮路名称", "派发", "依次递增", "合同", "价格", "公式", "元/", "油价", "运费", "机制"]
+    return not any(word in text for word in bad_words)
+
+
+def _extract_first_route_name(facts, contract_text):
+    """从Stage 1事实或OCR/DOCX文本中提取第一条线路名。"""
+    route_keys = ["第一条线路", "第一条线路名称", "线路名称", "首条线路", "邮路", "去程"]
+    for key in route_keys:
+        value = facts.get(key, "")
+        if isinstance(value, dict):
+            value = value.get("value", "")
+        route = _clean_route_name(value)
+        if route and route != "未提及" and _looks_like_route_name(route):
+            return route
+
+    text = str(contract_text or "")
+    html_cells = re.findall(r"<td[^>]*>(.*?)</td>", text, flags=re.I | re.S)
+    for cell in html_cells:
+        route = _clean_route_name(cell)
+        if _looks_like_route_name(route):
+            return route
+
+    # 兜底：匹配普通文本中的“城市-城市（编号）/城市-城市(编号)”。
+    for match in re.finditer(r"([\u4e00-\u9fa5A-Za-z0-9]{2,20}\s*[-—－]\s*[\u4e00-\u9fa5A-Za-z0-9]{2,20}(?:[（(][^）)]{0,20}[）)])?)", text):
+        route = _clean_route_name(match.group(1))
+        if _looks_like_route_name(route):
+            return route
+
+    return ""
+
+
+def _plain_text(value):
+    text = re.sub(r"<[^>]+>", "", str(value or ""))
+    return re.sub(r"\s+", "", text)
+
+
+def _company_aliases(subject_name):
+    text = str(subject_name or "").strip()
+    aliases = [text] if text else []
+    if "北京博华" in text or "博华物流" in text:
+        aliases.extend(["北京博华物流有限公司", "博华物流", "北京博华"])
+    if "天津智猪" in text or "智猪网" in text:
+        aliases.extend(["天津智猪网网络科技有限公司", "智猪网", "天津智猪"])
+    return [alias for i, alias in enumerate(aliases) if alias and alias not in aliases[:i]]
+
+
+def _has_keyword_near_company(text, company_aliases, keywords, window=180):
+    clean = _plain_text(text)
+    if not clean or not company_aliases:
+        return False
+
+    role_boundaries = ["承包方", "乙方", "发包方", "甲方"]
+
+    for alias in company_aliases:
+        start = 0
+        while True:
+            idx = clean.find(alias, start)
+            if idx < 0:
+                break
+            left = max(0, idx - window)
+            right = idx + len(alias) + window
+            segment = clean[left:right]
+            for keyword in keywords:
+                kw_start = segment.find(keyword)
+                while kw_start >= 0:
+                    kw_abs = left + kw_start
+                    between = clean[min(idx, kw_abs):max(idx, kw_abs)]
+                    if not any(boundary in between for boundary in role_boundaries):
+                        return True
+                    kw_start = segment.find(keyword, kw_start + len(keyword))
+            start = idx + len(alias)
+    return False
+
+
+def _has_keyword_near_party(text, keywords, party_label="乙方"):
+    """识别“乙方作为本项目第三中标人”这类不重复写公司全称的身份描述。"""
+    clean = _plain_text(text)
+    if not clean:
+        return False
+
+    def option_is_unchecked(segment, keyword_start):
+        checked = "☑√✓■●"
+        unchecked = "☐□£"
+        prefix = segment[:keyword_start]
+        marker_positions = [(prefix.rfind(mark), mark) for mark in checked + unchecked]
+        marker_positions = [(pos, mark) for pos, mark in marker_positions if pos >= 0]
+        if not marker_positions:
+            return False
+        pos, mark = max(marker_positions, key=lambda item: item[0])
+        return mark in unchecked
+
+    for keyword in keywords:
+        # 只允许“乙方...第X中标人”。不允许“第一中标人、第二中标人...乙方”，
+        # 后者通常是在描述前序供应商，不代表乙方主选/备选身份。
+        pattern = rf"{party_label}[^。；;,，、]{{0,80}}{keyword}"
+        for match in re.finditer(pattern, clean):
+            keyword_start = match.group(0).find(keyword)
+            if not option_is_unchecked(match.group(0), keyword_start):
+                return True
+    return False
+
+
+def _has_checked_identity_option(text, keywords):
+    """识别身份勾选项：☑采购项目第三成交人 有效，☐采购项目第一成交人 无效。"""
+    clean = _plain_text(text)
+    if not clean:
+        return False
+    checked = "☑√✓■●"
+    unchecked = "☐□£"
+    for keyword in keywords:
+        for match in re.finditer(keyword, clean):
+            prefix = clean[max(0, match.start() - 40):match.start()]
+            marker_positions = [(prefix.rfind(mark), mark) for mark in checked + unchecked]
+            marker_positions = [(pos, mark) for pos, mark in marker_positions if pos >= 0]
+            if not marker_positions:
+                continue
+            _, mark = max(marker_positions, key=lambda item: item[0])
+            if mark in checked:
+                return True
+    return False
+
+
+def _infer_contract_type_by_hard_rules(subject_name, contract_text, facts):
+    """合同类型硬规则：只看乙方是第几中标/成交人，不看线路备用/临时。"""
+    aliases = _company_aliases(subject_name)
+    fact_text_parts = []
+    for key in ["中标人信息", "中标人", "成交人信息", "业务范围描述", "合同标题", "合同期限"]:
+        value = facts.get(key, "")
+        if isinstance(value, dict):
+            fact_text_parts.append(str(value.get("value", "")))
+            fact_text_parts.append(str(value.get("evidence", "")))
+        else:
+            fact_text_parts.append(str(value))
+
+    evidence_text = "\n".join(fact_text_parts + [str(contract_text or "")])
+    main_keywords = ["第一中标人", "第1中标人", "第一成交人", "第1成交人", "第一中选", "第1中选", "主供应商"]
+    backup_keywords = [
+        "第二中标人", "第2中标人", "第三中标人", "第3中标人",
+        "第二成交人", "第2成交人", "第三成交人", "第3成交人",
+        "第二中选", "第2中选", "第三中选", "第3中选", "备选供应商",
+    ]
+
+    has_main = (
+        _has_keyword_near_company(evidence_text, aliases, main_keywords)
+        or _has_keyword_near_party(evidence_text, main_keywords)
+        or _has_checked_identity_option(evidence_text, main_keywords)
+    )
+    has_backup = (
+        _has_keyword_near_company(evidence_text, aliases, backup_keywords)
+        or _has_keyword_near_party(evidence_text, backup_keywords)
+        or _has_checked_identity_option(evidence_text, backup_keywords)
+    )
+
+    if has_main and has_backup:
+        return "主选/备选"
+    if has_main:
+        return "主选"
+    if has_backup:
+        return "备选"
+    return ""
+
+
+def process_contract(file_path, api_key, api_provider="deepseek-v4-pro"):
     from llm_client import LLMClient
     from stage1_fact_extraction import extract_facts
     from stage2_standardizer import standardize_fields
@@ -191,31 +374,23 @@ def process_contract(file_path, api_key, api_provider="anthropic"):
     if standardized is None:
         return {"error": "Stage 2 标准化映射失败"}
 
-    # Python级修正：如果合同类型=主选/备选，且没有有效的乙方侧中标依据，
-    # 回退只看线路表维度
-    if standardized.get("合同类型") == "主选/备选":
-        has_valid_bidding = False
-        for fk in ["中标人信息", "中标人", "成交人信息"]:
-            fv = facts.get(fk, "")
-            if isinstance(fv, dict):
-                fv_data = fv
-            else:
-                fv_data = {"value": str(fv)}
-            if not fv_data.get("_filtered") and fv_data.get("value", "") not in ("未提及", ""):
-                has_valid_bidding = True
-                break
-        if not has_valid_bidding:
-            # 没有有效的中标人信息，只看线路表
-            line_info = facts.get("线路表格", facts.get("线路信息", ""))
-            line_str = str(line_info) if line_info else ""
-            has_zhu = any(kw in line_str for kw in ["正式", "主选"])
-            has_bei = any(kw in line_str for kw in ["备用", "备选"])
-            if has_zhu and has_bei:
-                standardized["合同类型"] = "主选/备选"
-            elif has_bei:
-                standardized["合同类型"] = "备选"
-            else:
-                standardized["合同类型"] = "主选"
+    # Python级硬判定：合同类型只看乙方是第几中标/成交人。
+    # 甲方一定是客户侧（邮政/京东等），甲方采购描述不能决定我方合同类型。
+    hard_contract_type = _infer_contract_type_by_hard_rules(
+        standardized.get("合同主体", "") or their_name,
+        text,
+        facts,
+    )
+    if hard_contract_type:
+        standardized["合同类型"] = hard_contract_type
+
+    # 如果没有乙方第二中标/成交证据，LLM给出的"备选/主选/备选"一律保守降为主选。
+    elif standardized.get("合同类型") in ("备选", "主选/备选"):
+        standardized["合同类型"] = "主选"
+
+    # 合同类型不能为空：无有效证据且模型未输出时，按业务高频默认值兜底为主选。
+    if standardized.get("合同类型") in (None, "", "null", "None", "/", "未提及"):
+        standardized["合同类型"] = "主选"
 
     # 自动生成字段（2026-06-02 业务确认）
     import re as _re
@@ -239,24 +414,7 @@ def process_contract(file_path, api_key, api_provider="anthropic"):
     standardized["合同编码"] = f"{code_prefix}-{today_str}{seq}"
 
     # 合同名称 = 第一条线路名 + "一干运输合同"
-    route_name = ""
-    # 从 facts 或 contract_text 中找第一条线路
-    for key in ["第一条线路", "线路名称", "首条线路"]:
-        f = facts.get(key, "")
-        if isinstance(f, dict):
-            f = f.get("value", "")
-        if f and f != "未提及":
-            route_name = str(f).strip()
-            break
-    if not route_name:
-        # fallback: 从合同文本中搜索线路表
-        m = _re.search(r'(\w+)-(\w+)</td>', text)
-        if m:
-            route_name = m.group(0).replace("</td>", "").strip()
-    if not route_name:
-        route_name = "未命名线路"
-    # 清洗线路名（去掉HTML残留）
-    route_name = _re.sub(r'<[^>]+>', '', route_name).strip()
+    route_name = _extract_first_route_name(facts, text) or "未命名线路"
     standardized["合同名称"] = f"{route_name}一干运输合同"
 
     # 合同预警提醒 = 结束时间 - 今天
@@ -316,8 +474,14 @@ def _load_text(file_path, metadata=None):
                 for p in root.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}p'):
                     para = []
                     for t in p.iter('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'):
-                        if t.text and not t.text.strip().startswith('<') and not t.text.strip().startswith('http'):
-                            para.append(t.text)
+                        if not t.text:
+                            continue
+                        stripped = t.text.strip()
+                        if stripped.startswith("http"):
+                            continue
+                        if stripped.startswith("<") and not stripped.lower().startswith("<table"):
+                            continue
+                        para.append(t.text)
                     if para:
                         texts.append(''.join(para))
                 return '\n'.join(texts)
@@ -790,7 +954,7 @@ class ContractHandler(BaseHTTPRequestHandler):
         except Exception:
             data = {}
 
-        api_provider = data.get("api_provider", "anthropic")
+        api_provider = data.get("api_provider", "deepseek-v4-pro")
 
         # 优先取前端传入的key，否则按provider从环境变量取
         env_map = {
@@ -1373,7 +1537,10 @@ class ContractHandler(BaseHTTPRequestHandler):
 **⚠️ 合同类型复核的强制规则（最高优先级）**：
 复核"合同类型"差异时，你引用的中标/成交描述中**必须包含乙方公司全称**（如"北京博华物流有限公司"）。如果一段描述的主语只是甲方（如"江苏省分公司""中国邮政"），不含乙方公司名，则该描述与乙方类型**完全无关**，不能作为判断依据。
 - ✅ 有效："北京博华物流有限公司为...第一成交人"
+- ✅ 有效："乙方作为本项目第三中标人，接到甲方通知方能开始..."（乙方第三中标人=备选）
 - ❌ 无效："江苏省分公司...第一成交人（主供应商）"——不含乙方名，Ignore
+- "主选/备选"必须同时存在主选侧和备选侧两个有效证据；普通"备用"、"临时邮路"、标包号不能单独触发备选。
+- 线路性质、邮路性质、临时邮路、备用线路不作为合同类型证据；合同类型只看乙方是第一、第二还是第三中标/成交人。
 
 **对其他差异字段的复核要求**：
 
