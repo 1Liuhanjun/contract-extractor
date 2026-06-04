@@ -1,0 +1,98 @@
+# 字段映射：声明每列「从哪来、要不要抽、怎么填」。换公司/换字段只改这里。
+# source: A=合同抽取  B=派生计算  C=系统外/红字(留空)  D=固定值默认(**已弃用，勿再使用**)
+# extract:false 的列一律不抽（红字或流程状态）；分包号是例外(extract:true)。
+# field: 抽取/计算时使用的规范字段名（缺省=name）。kind:date 写成日期。
+# formula: 直接写入该 Excel 公式串（{row} 会被替换为行号）。default: 取 config.defaults 里的键。
+# no_llm:true：source 为 A 但**不问 LLM**，值由代码注入（如客户分类=分类结果），既非默认值也非抽取。
+# 原则：业务字段一律不用固定默认值（防"自信填错"）。合同主体/公司主体抽乙方；客户分类用分类结果注入。
+
+ledger_sheet_prefix: "新合同台账"   # 台账 sheet 用前缀匹配（模板名带年月）
+youzheng_sheet: "邮政"
+
+# ---------------- 新合同台账 sheet（每份合同 1 行）----------------
+ledger:
+  - {col: A,  name: 登记日期,        source: C, extract: false}   # 红字：录入系统日期，不在合同抽（按同事口径）
+  - {col: B,  name: 项目名称/编号,   source: C, extract: false}
+  - {col: C,  name: 客户分类,        source: A, field: 客户分类, no_llm: true}   # 由分类层结果注入(=已识别公司)，非默认值、不问LLM
+  - {col: D,  name: 业务类型,        source: A, field: 业务类型}
+  - {col: E,  name: 合同类型,        source: A, field: 合同类型}
+  - {col: F,  name: 省,              source: A, field: 省}
+  - {col: G,  name: 市,              source: A, field: 市}
+  - {col: H,  name: 客户名称,        source: A, field: 客户名称}
+  - {col: I,  name: 合同主体,        source: A, field: 合同主体}   # 抽取合同「乙方/承包方」全称（曾误用固定默认值"博华"，对天津智猪网等合同全错）
+  - {col: J,  name: 合同编码,        source: C, extract: false}
+  - {col: K,  name: 合同名称,        source: C, extract: false}   # 红字：内部项目名(非合同标题)，不在合同抽（按同事口径）
+  - {col: L,  name: 合同开始时间,    source: A, field: 合同开始时间, kind: date}
+  - {col: M,  name: 合同结束时间,    source: A, field: 合同结束时间, kind: date}
+  - {col: N,  name: 是否完成签订,    source: A, field: 是否完成签订}   # 同事口径：据签章页判断 是/否（绿色可抽字段，非红字）
+  - {col: O,  name: 是否同步财务,    source: C, extract: false}
+  - {col: P,  name: 合同预警提醒,    source: B, formula: '=IFERROR(DATEDIF(NOW(),M{row},"d"),"")'}
+  - {col: Q,  name: 账期（天）,      source: A, field: 账期}
+  - {col: R,  name: 保证金（万元）,  source: A, field: 保证金}
+  - {col: S,  name: 税率,            source: A, field: 税率}
+  - {col: T,  name: 是否有旺季补偿,  source: A, field: 是否有旺季补偿}
+  - {col: U,  name: 旺季补偿时间,    source: A, field: 旺季补偿时间}
+  - {col: V,  name: 旺季补偿规则,    source: A, field: 旺季补偿规则}
+  - {col: W,  name: 补偿比例,        source: A, field: 补偿比例}
+  - {col: X,  name: 是否有油价联动,  source: A, field: 是否有油价联动}
+  - {col: Y,  name: 油价基准,        source: A, field: 油价基准}
+  - {col: Z,  name: 是否有疫情补贴,  source: A, field: 是否有疫情补贴}
+  - {col: AA, name: 补贴标准,        source: A, field: 补贴标准}
+  - {col: AB, name: 联系人,          source: C, extract: false}   # 红字：乙方现场对接人，不在合同抽（按同事口径）
+  - {col: AC, name: 电话,            source: C, extract: false}   # 红字：同上
+  - {col: AD, name: 地址,            source: C, extract: false}   # 红字：乙方服务/现场地址，非合同注册/通知地址（按同事口径）
+  - {col: AE, name: 快递单号,        source: C, extract: false}
+  - {col: AF, name: 钉钉审批单号,    source: C, extract: false}
+
+# ---------------- 邮政 sheet（每条线路 1 行）----------------
+youzheng:
+  - {col: A,  name: 省,              source: A, field: 省,        from: ledger}   # 与台账一致
+  - {col: B,  name: 市,              source: B, field: 市}                        # 派生自线路名前两字
+  - {col: C,  name: 合同编码,        source: C, extract: false}
+  - {col: D,  name: 业务类型,        source: A, field: 业务类型,  from: ledger}
+  - {col: E,  name: 分包号,          source: A, field: 分包号,    extract: true}  # 例外：红字但要抽
+  - {col: F,  name: 线路名称,        source: A, field: 线路名称}
+  - {col: G,  name: 邮路性质,        source: A, field: 邮路性质}
+  - {col: H,  name: 里程,            source: A, field: 里程}
+  # I..R 为吨位价格列：合同直读则填直读值，否则按系数换算（见 tonnage_columns）
+  - {col: I,  name: "2.75吨/3吨",   source: AB, tonnage: true}
+  - {col: J,  name: "5吨",          source: AB, tonnage: true}
+  - {col: K,  name: "4.2米",        source: AB, tonnage: true}
+  - {col: L,  name: "8吨",          source: AB, tonnage: true}
+  - {col: M,  name: "12吨/9.6米",   source: AB, tonnage: true}
+  - {col: N,  name: "15吨",         source: AB, tonnage: true}
+  - {col: O,  name: "20吨/12.5",    source: AB, tonnage: true}
+  - {col: P,  name: "25吨",         source: AB, tonnage: true}
+  - {col: Q,  name: "30吨、17.5",   source: AB, tonnage: true}
+  - {col: R,  name: "40吨A",        source: AB, tonnage: true}
+  - {col: S,  name: "元/趟/条/40吨B", source: C, extract: false}   # 红字(文档红色高亮)：40吨B/计价单位列，不抽取
+  - {col: T,  name: 有效期开始时间,  source: A, field: 合同开始时间, from: ledger, kind: date}
+  - {col: U,  name: 有效期结束时间,  source: A, field: 合同结束时间, from: ledger, kind: date}
+  - {col: V,  name: 公司主体,        source: A, field: 合同主体, from: ledger}   # 继承台账「合同主体」(乙方)，与台账一致（曾误用固定默认值）
+  - {col: W,  name: 类型,            source: C, extract: false}   # 红字：计趟/计重由人工标注，不抽取
+  - {col: X,  name: 备注,            source: C, extract: false}   # 红字：备注由人工添加，不抽取
+  - {col: Y,  name: 是否退线,        source: C, extract: false}
+  - {col: Z,  name: 退线时间,        source: C, extract: false}
+  - {col: AA, name: 合同编号,        source: C, extract: false}   # 红字：不抽取（同合同不同文件去重改用文件内容 sha1）
+  - {col: AB, name: 返程线路编码,    source: C, extract: false}
+  - {col: AC, name: 延期结束时间,    source: C, extract: false}
+
+# 辅助抽取字段：本身不占 Excel 列，仅供派生计算。LLM 会被要求一并抽取。
+#   合同期限：合同无固定结束日（写"自签订之日起N年/月"）时，用它 + 合同开始时间推算合同结束时间。
+aux_extract:
+  - field: 合同期限
+    hint: "合同有效期/服务期的时长表述，如『自签订之日起2年』『24个月』『一年』。只在合同用相对期限而非写明固定结束日期时才有值；照抄原文，不要自行换算成日期。"
+
+# 吨位列 → 主吨位数值（用于系数换算时按吨位对齐；ton=null 的列不参与换算）
+tonnage_columns:
+  - {col: I, name: "2.75吨/3吨",   ton: 3}
+  - {col: J, name: "5吨",          ton: 5}
+  - {col: K, name: "4.2米",        ton: null}
+  - {col: L, name: "8吨",          ton: 8}
+  - {col: M, name: "12吨/9.6米",   ton: 12}
+  - {col: N, name: "15吨",         ton: 15}
+  - {col: O, name: "20吨/12.5",    ton: 20}
+  - {col: P, name: "25吨",         ton: 25}
+  - {col: Q, name: "30吨、17.5",   ton: 30}
+  - {col: R, name: "40吨A",        ton: 40}
+  # 注：S「元/趟/条/40吨B」已改红字不抽取，不再列入吨位列（既不直读也不换算）

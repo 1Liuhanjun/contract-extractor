@@ -1,0 +1,73 @@
+# 合同读取智能体 - 配置（路径相对本文件所在目录解析）
+
+ocr:
+  provider: paddleocr_vl
+  # 完整 jobs 端点（AI Studio 任务页「API 调用示例」里的 JOB_URL 原样填入）
+  base_url: "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+  model: "PaddleOCR-VL-1.6"
+  token_env: PADDLEOCR_ACCESS_TOKEN  # 令牌从环境变量/.env 读取，不写进配置（认证用 bearer）
+  timeout: 120                       # 单次 HTTP 超时（提交/轮询/下载）
+  poll_interval: 5                   # 轮询间隔秒
+  max_wait: 1800                     # 单份合同 OCR 最长等待秒（异步任务）
+  max_retries: 3
+  optional_payload:                  # PaddleOCR-VL 可选项（按官方示例默认全关）
+    useDocOrientationClassify: false
+    useDocUnwarping: false
+    useChartRecognition: false
+
+llm:
+  provider: deepseek
+  base_url: "https://api.deepseek.com"
+  # V4 模型（旧 deepseek-chat/deepseek-reasoner 将于 2026-07-24 弃用）。
+  # deepseek-v4-pro：思考模式(默认)、推理强、1M 上下文、最大输出 384K；deepseek-v4-flash：更快更便宜。
+  model: "deepseek-v4-pro"
+  token_env: DEEPSEEK_API_KEY
+  temperature: 0
+  max_tokens: 16384                  # 速度优化(P0-2)：32768→16384，减少生成时间；超长线路表仍有截断抢救兜底
+  # 思考模式可能不接受强制 JSON：默认关 response_format，改用 prompt 约束+容错解析。
+  # 若实测该模型在当前模式支持强制 JSON，可设 true 提升稳定性。
+  use_response_format: false
+  timeout: 120                       # 速度优化(P0-1)：关思考后无需长超时
+  max_retries: 3
+
+# 网页端批量上传时，同时**并发**处理的合同数（每份各自调用 OCR/LLM、各写独立台账、各自实时进度）。
+# 太大可能触发 OCR/LLM API 限流；本地单人建议 2~4。可用环境变量 PIPELINE_CONCURRENCY 覆盖。
+max_concurrency: 3
+
+paths:
+  template_xlsx: "templates/合同台账表_新(3).xlsx"   # 自包含：模板随代码目录
+  field_map: "field_map.yaml"
+  skill_youzheng: "companies/youzheng.md"
+  input_dir: "./input"                               # run.py 无参时默认处理此目录下所有 PDF
+  output_dir: "./output"                             # 所有产物统一放这里
+
+classify:
+  youzheng_keywords: ["中国邮政", "邮件运输", "邮政集团", "邮路", "邮件转运"]
+  jingdong_keywords: ["京东物流", "京东"]
+  threshold: 1                        # 命中次数阈值
+
+# 一期只交付邮政；二期加京东时把 "京东" 加进来。
+# TODO(二期扩展性)：当前 pipeline 写明细表/抽取 prompt 仍按"邮政"硬编码，
+#   真正做到"换公司只改配置"需把【公司→(skill, 抽取块, 明细sheet, field_map段)】做成注册表，
+#   见审查报告 P2。届时本列表与该注册表合并。
+supported_companies: ["邮政"]
+
+# 准确率增强（v2 §13）。文字字段靠证据回查+投票；价格数字靠 OCR 交叉+校验层。
+enhance:
+  evidence_recheck: true          # §13.1 证据回查（反幻觉）：evidence 须在 OCR 原文命中
+  self_consistency: true          # §13.1 低置信字段多次投票取多数
+  low_conf_threshold: 0.7         # 低于此置信 或 证据未命中 → 触发投票
+  n_votes: 3                      # 投票次数
+  vote_temperature: 0.7           # 投票时的采样温度（>0 才有多样性）
+  cross_check_prices: false       # §13.2 价格数字第二引擎(RapidOCR)交叉复核；需 pip install rapidocr_onnxruntime
+  cross_check_dpi: 400            # 交叉复核时本地重渲染 DPI
+  price_range: [1, 1000000]       # §5 价格区间校验
+
+# 字段默认值（已清空）。
+# 原则：**不允许任何业务字段使用固定默认值**——默认值会在合同实际值不同时"自信地填错"
+#   （历史 bug：合同主体/公司主体硬编码"北京博华物流"，对乙方是"天津智猪网"等的合同全错）。
+# 现状：
+#   - 客户分类  → 由分类层结果(company)注入，见 pipeline.py（恒等于已识别公司，非默认值）。
+#   - 合同主体 / 公司主体 → 改为从合同「乙方/承包方」抽取，见 field_map.yaml + ledger.md。
+# 本字典保留仅为兼容 source:D / 红字列的取值接口；**请勿再往这里加业务默认值**。
+defaults: {}

@@ -9,13 +9,19 @@
 <body>
 
 <div class="app-container">
-    <header>
-        <h1>📄 合同字段提取系统</h1>
-        <p class="subtitle">Stage 1: 事实抽取 → Stage 2: 标准化映射 → Excel | 累积文件: <code>data/results/合同提取汇总.xlsx</code></p>
+    <header class="app-hero">
+        <div>
+            <div class="eyebrow">Contract Intelligence Workspace</div>
+            <h1>合同主表与附表提取</h1>
+            <p class="subtitle">上传合同文件后自动生成 Excel，主表与附表并行处理。</p>
+        </div>
+        <div class="hero-actions">
+            <button class="btn btn-ghost" onclick="toggleDeveloperMode()" id="btn-dev-mode">开发者模式</button>
+        </div>
     </header>
 
     <!-- API 配置 -->
-    <section class="card config-card">
+    <section class="card config-card dev-only">
         <div class="card-header" onclick="toggleSection('config-body')">
             <span>⚙️ API 配置</span>
             <span class="toggle-icon">▼</span>
@@ -40,7 +46,7 @@
     </section>
 
     <!-- Tab 导航 -->
-    <div class="tabs">
+    <div class="tabs dev-only">
         <button class="tab-btn active" onclick="switchTab('extract')">📥 提取</button>
         <button class="tab-btn" onclick="switchTab('verify')">✅ 验证</button>
         <button class="tab-btn" onclick="switchTab('history')">📋 复盘</button>
@@ -49,45 +55,87 @@
     <!-- ==================== Tab: 提取 ==================== -->
     <div id="tab-extract" class="tab-content active">
         <!-- 拖拽上传 -->
-        <section class="card">
-            <div class="card-header">📤 上传合同文件</div>
+        <section class="card upload-card">
+            <div class="card-header">
+                <span>合同文件</span>
+                <span class="card-kicker">PDF / DOCX / TXT</span>
+            </div>
             <div class="card-body">
                 <div class="drop-zone" id="drop-zone"
                      ondragover="event.preventDefault(); this.classList.add('dragover')"
                      ondragleave="this.classList.remove('dragover')"
                      ondrop="event.preventDefault(); this.classList.remove('dragover'); handleDrop(event)">
-                    <div class="drop-icon">📄</div>
+                    <div class="drop-icon">+</div>
+                    <h2>拖入合同文件</h2>
                     <p>拖拽 .pdf / .docx / .txt 文件到此处</p>
                     <p class="drop-hint">选择后自动上传并开始提取</p>
                     <input type="file" id="file-input" multiple accept=".pdf,.docx,.txt" style="display:none" onchange="handleSelect(event)">
-                    <button class="btn btn-secondary" onclick="document.getElementById('file-input').click()">选择文件</button>
+                    <button class="btn btn-primary" onclick="document.getElementById('file-input').click()">选择文件</button>
                 </div>
                 <div id="file-list"></div>
                 <div class="actions">
                     <button class="btn btn-primary" onclick="doUpload()" id="btn-upload" style="display:none">📤 上传到服务器</button>
                     <button class="btn btn-primary" onclick="doProcess()" id="btn-process" style="display:none" disabled>🚀 开始提取</button>
-                    <button class="btn btn-danger" onclick="clearAll()">🗑️ 清空</button>
-                    <button class="btn btn-danger" onclick="shutdown()" style="background:var(--danger);margin-left:auto">🚪 退出</button>
+                    <button class="btn btn-secondary" onclick="clearAll()">清空</button>
+                    <button class="btn btn-danger dev-only" onclick="shutdown()" style="background:var(--danger);margin-left:auto">退出</button>
                 </div>
             </div>
         </section>
 
         <!-- 日志 -->
-        <section class="card" id="log-section" style="display:none">
+        <section class="card dev-only" id="log-section" style="display:none">
             <div class="card-header">📝 处理日志</div>
             <div class="card-body"><pre id="log-output" class="log-box"></pre></div>
+        </section>
+
+        <!-- 并行进度 -->
+        <section class="card" id="parallel-progress-section" style="display:none">
+            <div class="card-header">
+                <span>⚡ 并行提取进度</span>
+                <span id="parallel-progress-summary" class="progress-summary">准备中</span>
+            </div>
+            <div class="card-body">
+                <div class="parallel-progress">
+                    <div class="pipeline-row" id="progress-input-row">
+                        <div class="pipeline-meta">
+                            <span class="pipeline-name">OCR / 文本准备</span>
+                            <span class="pipeline-status" id="progress-input-status">等待中</span>
+                        </div>
+                        <div class="pipeline-track"><div class="pipeline-fill" id="progress-input-fill"></div></div>
+                    </div>
+                    <div class="pipeline-split">
+                        <div class="pipeline-row" id="progress-main-row">
+                            <div class="pipeline-meta">
+                                <span class="pipeline-name">主表项目</span>
+                                <span class="pipeline-status" id="progress-main-status">等待 OCR/文本</span>
+                            </div>
+                            <div class="pipeline-track"><div class="pipeline-fill main-fill" id="progress-main-fill"></div></div>
+                        </div>
+                        <div class="pipeline-row" id="progress-appendix-row">
+                            <div class="pipeline-meta">
+                                <span class="pipeline-name">附表项目</span>
+                                <span class="pipeline-status" id="progress-appendix-status">等待 OCR/文本</span>
+                            </div>
+                            <div class="pipeline-track"><div class="pipeline-fill appendix-fill" id="progress-appendix-fill"></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </section>
 
         <!-- 结果 -->
         <section class="card" id="result-section" style="display:none">
             <div class="card-header">
-                <span>📊 提取结果</span>
-                <button class="btn btn-info btn-sm" onclick="showReport()">📋 生成报告</button>
+                <span>提取结果</span>
+                <div class="result-actions">
+                    <button class="btn btn-success btn-sm" onclick="exportExcel()">下载 Excel</button>
+                    <button class="btn btn-info btn-sm dev-only" onclick="showReport()">生成报告</button>
+                </div>
             </div>
             <div class="card-body">
-                <h4 style="margin:0 0 8px">主表</h4>
+                <h4 class="section-title">主表</h4>
                 <div id="result-table-wrapper" class="table-wrapper"></div>
-                <h4 style="margin:18px 0 8px">附表</h4>
+                <h4 class="section-title appendix-title">附表</h4>
                 <div id="appendix-table-wrapper" class="table-wrapper">
                     <p class="muted">附表线路明细会在提取完成后显示。</p>
                 </div>
@@ -225,7 +273,7 @@
         </div>
     </div>
 
-    <footer><p>合同字段提取系统 v2 | 两阶段架构：事实抽取 → 标准化映射</p></footer>
+    <footer><p>合同字段提取系统 v2<span class="dev-only"> | 两阶段架构：事实抽取 → 标准化映射</span></p></footer>
 </div>
 
 <div id="toast" class="toast"></div>
@@ -238,6 +286,9 @@ let uploadedFileNames = [];
 let processResults = [];
 let refRows = [];
 let currentVerifyIndex = -1;
+let parallelProgressTimer = null;
+let parallelProgressStartedAt = 0;
+let parallelProgressFiles = [];
 
 // ============================================================
 // 工具
@@ -276,6 +327,13 @@ function switchTab(tab) {
 function toggleSection(id) {
     const b = document.getElementById(id);
     b.style.display = b.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleDeveloperMode() {
+    const enabled = document.body.classList.toggle('dev-mode');
+    const btn = document.getElementById('btn-dev-mode');
+    btn.textContent = enabled ? '退出开发者模式' : '开发者模式';
+    if (!enabled) switchTab('extract');
 }
 
 // ============================================================
@@ -378,6 +436,8 @@ async function clearAll() {
     document.getElementById('file-list').innerHTML = '';
     document.getElementById('result-section').style.display = 'none';
     document.getElementById('log-section').style.display = 'none';
+    stopParallelProgress();
+    document.getElementById('parallel-progress-section').style.display = 'none';
     document.getElementById('btn-process').disabled = true;
     await fetch('/api/clear', { method: 'POST' });
     showToast('已清空', 'info');
@@ -402,6 +462,7 @@ async function doProcess() {
     document.getElementById('btn-process').textContent = '⏳ 处理中...';
     document.getElementById('log-section').style.display = 'block';
     document.getElementById('log-output').textContent = '';
+    startParallelProgress(uploadedFileNames);
 
     log('📤 上传文件...');
     log(`   文件: ${uploadedFileNames.join(', ')}`);
@@ -422,6 +483,7 @@ async function doProcess() {
         if (!d.success) throw new Error(d.error);
 
         processResults = d.results;
+        finishParallelProgress(processResults, true);
         // 新合同提取 → 清掉旧合同的订正和复核数据
         window._verifyData = null;
         window._reviewData = null;
@@ -456,6 +518,7 @@ async function doProcess() {
         ok = true;
 
     } catch (e) {
+        finishParallelProgress([], false, e.message);
         log(`\n❌ 错误: ${e.message}`);
         showToast(`处理失败: ${e.message}`, 'error');
     }
@@ -463,6 +526,80 @@ async function doProcess() {
     document.getElementById('btn-process').disabled = false;
     document.getElementById('btn-process').textContent = '🚀 开始提取';
     return ok;
+}
+
+function setPipelineProgress(kind, percent, status, state='running') {
+    const fill = document.getElementById(`progress-${kind}-fill`);
+    const statusEl = document.getElementById(`progress-${kind}-status`);
+    const row = document.getElementById(`progress-${kind}-row`);
+    if (!fill || !statusEl || !row) return;
+    fill.style.width = `${Math.max(0, Math.min(100, percent))}%`;
+    statusEl.textContent = status;
+    row.classList.remove('is-running', 'is-done', 'is-error', 'is-waiting');
+    row.classList.add(`is-${state}`);
+}
+
+function startParallelProgress(fileNames) {
+    stopParallelProgress();
+    parallelProgressFiles = fileNames || [];
+    parallelProgressStartedAt = Date.now();
+    document.getElementById('parallel-progress-section').style.display = 'block';
+    document.getElementById('parallel-progress-summary').textContent = '处理中';
+
+    updateParallelProgress();
+    parallelProgressTimer = setInterval(updateParallelProgress, 900);
+}
+
+function updateParallelProgress() {
+    const elapsed = (Date.now() - parallelProgressStartedAt) / 1000;
+    const hasPdf = parallelProgressFiles.some(name => name.toLowerCase().endsWith('.pdf'));
+    const inputDoneAt = hasPdf ? 16 : 2;
+    const inputLabel = hasPdf ? 'PaddleOCR 转 Markdown 中' : '读取合同文本中';
+
+    if (elapsed < inputDoneAt) {
+        const p = hasPdf ? Math.min(94, 12 + elapsed * 5) : Math.min(90, 35 + elapsed * 28);
+        setPipelineProgress('input', p, inputLabel, 'running');
+        setPipelineProgress('main', 8, '等待共享文本', 'waiting');
+        setPipelineProgress('appendix', 8, '等待共享文本', 'waiting');
+        return;
+    }
+
+    setPipelineProgress('input', 100, hasPdf ? 'Markdown 已生成' : '文本已准备', 'done');
+    const parallelElapsed = elapsed - inputDoneAt;
+    const mainP = Math.min(93, 22 + parallelElapsed * 3.2);
+    const appendixP = Math.min(93, 18 + parallelElapsed * 2.8);
+    setPipelineProgress('main', mainP, 'Stage 1 + Stage 2 抽取中', 'running');
+    setPipelineProgress('appendix', appendixP, 'Addition 附表流程抽取中', 'running');
+}
+
+function finishParallelProgress(results, success, errorMsg='') {
+    stopParallelProgress();
+    const summary = document.getElementById('parallel-progress-summary');
+    if (!success) {
+        setPipelineProgress('input', 100, '已结束', 'error');
+        setPipelineProgress('main', 100, '处理失败', 'error');
+        setPipelineProgress('appendix', 100, errorMsg ? '处理失败' : '已结束', 'error');
+        summary.textContent = '失败';
+        return;
+    }
+
+    const appendixFailed = (results || []).some(r => r.appendix && r.appendix.success === false);
+    setPipelineProgress('input', 100, '已完成', 'done');
+    setPipelineProgress('main', 100, '主表完成', 'done');
+    setPipelineProgress(
+        'appendix',
+        100,
+        appendixFailed ? '附表完成（有警告）' : '附表完成',
+        appendixFailed ? 'error' : 'done'
+    );
+    summary.textContent = appendixFailed ? '完成，有附表警告' : '全部完成';
+}
+
+function stopParallelProgress() {
+    if (parallelProgressTimer) {
+        clearInterval(parallelProgressTimer);
+        parallelProgressTimer = null;
+    }
 }
 
 function renderResultTable(results) {

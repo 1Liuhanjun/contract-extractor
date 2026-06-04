@@ -18,6 +18,7 @@ import io
 import re
 import mimetypes
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from datetime import datetime
@@ -344,10 +345,23 @@ def process_contract(file_path, api_key, api_provider="deepseek-v4-pro"):
     if text is None or len(text) < 50:
         return {"error": "文件内容过短或无法读取"}
 
+    appendix_future = None
+    executor = None
+    markdown_path = _prepare_appendix_markdown(file_path, text, load_meta)
+    if markdown_path:
+        try:
+            from addition_bridge import run_addition_appendix
+            executor = ThreadPoolExecutor(max_workers=1)
+            appendix_future = executor.submit(run_addition_appendix, file_path, markdown_path)
+            print("  [附表] 已启动 Addition 共享 OCR/文本附表流程")
+        except Exception as e:
+            print(f"  [附表错误] 启动 Addition 共享 OCR/文本流程失败: {e}")
+
     llm = LLMClient(provider=api_provider, api_key=api_key)
     facts = extract_facts(text, llm)
     if facts is None:
-        return {"error": "Stage 1 事实抽取失败"}
+        appendix_result = _collect_appendix_result(appendix_future, executor, file_path)
+        return {"error": "Stage 1 事实抽取失败", "appendix": appendix_result}
 
     # Python级安全校验：中标人信息必须包含乙方公司名，否则标记为不可靠
     # 这个操作 LLM 做不好（容易把甲方描述误判为乙方）
@@ -372,7 +386,8 @@ def process_contract(file_path, api_key, api_provider="deepseek-v4-pro"):
     examples = get_all_examples()
     standardized = standardize_fields(facts, examples, llm)
     if standardized is None:
-        return {"error": "Stage 2 标准化映射失败"}
+        appendix_result = _collect_appendix_result(appendix_future, executor, file_path)
+        return {"error": "Stage 2 标准化映射失败", "appendix": appendix_result}
 
     # Python级硬判定：合同类型只看乙方是第几中标/成交人。
     # 甲方一定是客户侧（邮政/京东等），甲方采购描述不能决定我方合同类型。
@@ -437,14 +452,32 @@ def process_contract(file_path, api_key, api_provider="deepseek-v4-pro"):
         if f in standardized and standardized[f] in (None, "", "null", "None"):
             standardized[f] = "/"
 
-    appendix_result = None
+    appendix_result = _collect_appendix_result(appendix_future, executor, file_path)
+
+    response = {"facts": facts, "result": standardized, "file_name": os.path.basename(file_path), "contract_text": text}
+    response["appendix"] = appendix_result
+    if load_meta.get("ocr"):
+        response["ocr"] = load_meta["ocr"]
+    return response
+
+
+def _collect_appendix_result(appendix_future, executor, file_path):
     try:
-        from src_appendix.appendix_extractor import extract_appendix
-        appendix_llm = LLMClient(provider=api_provider, api_key=api_key)
-        appendix_result = extract_appendix(text, appendix_llm)
-        print(f"  [附表] 已提取 {appendix_result.get('row_count', 0)} 行线路明细")
+        if appendix_future is None:
+            return {
+                "success": False,
+                "found": False,
+                "row_count": 0,
+                "rows": [],
+                "error": "未启动附表流程：缺少可共享的 OCR markdown/文本",
+                "warnings": ["未启动附表流程：缺少可共享的 OCR markdown/文本"],
+            }
+        result = appendix_future.result()
+        print(f"  [附表] 已提取 {result.get('row_count', 0)} 行线路明细")
+        return result
     except Exception as e:
-        appendix_result = {
+        print(f"  [附表错误] {e}")
+        return {
             "success": False,
             "found": False,
             "row_count": 0,
@@ -452,13 +485,31 @@ def process_contract(file_path, api_key, api_provider="deepseek-v4-pro"):
             "error": str(e),
             "warnings": [f"附表提取失败: {e}"],
         }
-        print(f"  [附表错误] {e}")
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False)
 
-    response = {"facts": facts, "result": standardized, "file_name": os.path.basename(file_path), "contract_text": text}
-    response["appendix"] = appendix_result
-    if load_meta.get("ocr"):
-        response["ocr"] = load_meta["ocr"]
-    return response
+
+def _prepare_appendix_markdown(file_path, text, load_meta):
+    """Return a markdown-like text file for Addition's post-OCR pipeline."""
+    markdown_path = (load_meta.get("ocr") or {}).get("saved_text_path")
+    if markdown_path and os.path.exists(markdown_path):
+        return markdown_path
+    if not text or len(text) < 50:
+        return None
+
+    try:
+        os.makedirs(OCR_TEXT_DIR, exist_ok=True)
+        base = os.path.splitext(os.path.basename(file_path))[0]
+        safe_base = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff._-]+", "_", base).strip("_") or "contract"
+        path = os.path.join(OCR_TEXT_DIR, f"{safe_base}_shared_text.md")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        load_meta["shared_text"] = {"saved_text_path": path}
+        return path
+    except Exception as e:
+        print(f"  [附表错误] 保存共享文本失败: {e}")
+        return None
 
 
 def _load_text(file_path, metadata=None):

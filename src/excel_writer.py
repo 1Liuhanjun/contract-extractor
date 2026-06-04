@@ -10,10 +10,16 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
-from src_appendix.appendix_schema import APPENDIX_HEADERS, APPENDIX_SHEET_NAME
-
 MAIN_SHEET_NAME = "主表"
 LEGACY_MAIN_SHEET_NAME = "合同信息提取"
+APPENDIX_SHEET_NAME = "附表"
+APPENDIX_HEADERS = [
+    "省", "市", "合同编码", "业务类型", "分包号", "线路名称", "邮路性质", "里程",
+    "2.75吨/3吨", "5吨", "4.2米", "8吨", "12吨/9.6米", "15吨", "20吨/12.5",
+    "25吨", "30吨、17.5", "40吨A", "元/趟/条/40吨B", "有效期开始时间",
+    "有效期结束时间", "公司主体", "类型", "备注", "是否退线", "退线时间",
+    "合同编号", "返程线路编码", "延期结束时间",
+]
 
 
 def _styles():
