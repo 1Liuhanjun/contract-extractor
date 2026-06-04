@@ -48,10 +48,108 @@ os.makedirs(RESULTS_DIR, exist_ok=True)
 os.makedirs(OCR_TEXT_DIR, exist_ok=True)
 os.makedirs(LEARNING_DIR, exist_ok=True)
 
+CONTRACT_CODE_COUNTERS = {}
+
 
 # ============================================================
 # 核心处理逻辑
 # ============================================================
+def _contract_subject_code(subject_name):
+    """合同主体 → 编码前缀。未知主体保守归为 QTZT，避免误写成 BHWL。"""
+    text = str(subject_name or "")
+    rules = [
+        ("BHWL", ["北京博华物流有限公司", "博华物流", "北京博华"]),
+        ("TJZZ", ["天津智猪网网络科技有限公司", "智猪网", "天津智猪"]),
+    ]
+    for code, keywords in rules:
+        if any(keyword in text for keyword in keywords):
+            return code
+    return "QTZT"
+
+
+def _customer_code(customer_type, customer_name):
+    """客户分类/名称 → 合同编码中段。"""
+    text = f"{customer_type or ''}{customer_name or ''}"
+    if "邮政" in text or "中国邮政" in text:
+        return "YZ邮政"
+    if "京东" in text:
+        return "JD京东"
+    return "QT其他"
+
+
+def _next_contract_code_sequence(code_prefix, today_str):
+    """根据累积 Excel 和本轮进程内计数生成当日序号。"""
+    cache_key = f"{code_prefix}-{today_str}"
+    max_seq = CONTRACT_CODE_COUNTERS.get(cache_key, 0)
+
+    if os.path.exists(CUMULATIVE_EXCEL):
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(CUMULATIVE_EXCEL, read_only=True, data_only=True)
+            ws = wb.active
+            header_row = [cell.value for cell in ws[1]]
+            if "合同编码" in header_row:
+                code_col = header_row.index("合同编码") + 1
+                prefix = f"{code_prefix}-{today_str}"
+                for row in range(2, ws.max_row + 1):
+                    value = ws.cell(row=row, column=code_col).value
+                    if not value:
+                        continue
+                    value = str(value).strip()
+                    if not value.startswith(prefix):
+                        continue
+                    m = re.search(r"(\d{3})$", value)
+                    if m:
+                        max_seq = max(max_seq, int(m.group(1)))
+            wb.close()
+        except Exception:
+            pass
+
+    next_seq = max_seq + 1
+    CONTRACT_CODE_COUNTERS[cache_key] = next_seq
+    return str(next_seq).zfill(3)
+
+
+def _parse_date_value(value):
+    """解析常见合同日期格式，返回 date；解析失败返回 None。"""
+    if value is None:
+        return None
+    if hasattr(value, "date") and hasattr(value, "strftime"):
+        try:
+            return value.date()
+        except Exception:
+            pass
+    if hasattr(value, "strftime"):
+        try:
+            return value
+        except Exception:
+            pass
+
+    text = str(value).strip()
+    if not text or text in ("null", "None", "/"):
+        return None
+
+    m = re.search(r"(\d{4})[年/-](\d{1,2})[月/-](\d{1,2})", text)
+    if not m:
+        m = re.search(r"(\d{4})(\d{2})(\d{2})", text)
+    if not m:
+        return None
+
+    try:
+        return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+    except Exception:
+        return None
+
+
+def _calculate_warning_days(end_date_value):
+    """合同预警提醒：合同结束时间 - 今天，过期返回负数。"""
+    end_date = _parse_date_value(end_date_value)
+    if end_date is None:
+        return ""
+    from datetime import date
+    return str((end_date - date.today()).days)
+
+
 def process_contract(file_path, api_key, api_provider="anthropic"):
     from llm_client import LLMClient
     from stage1_fact_extraction import extract_facts
@@ -132,11 +230,13 @@ def process_contract(file_path, api_key, api_provider="anthropic"):
     # 合同主体 = Stage 2 从合同提取（乙方名称，可能是博华或其他公司）
     # 不再硬编码，由 LLM 从合同原文中提取
 
-    # 合同编码 = BHWL-YZ邮政-YYYYMMDDNNN
+    # 合同编码 = 合同主体缩写-客户缩写-YYYYMMDDNNN
     today_str = _date.today().strftime("%Y%m%d")
-    existing = [f for f in os.listdir(RESULTS_DIR) if f.startswith(f"BHWL-YZ邮政-{today_str}")]
-    seq = str(len(existing) + 1).zfill(3)
-    standardized["合同编码"] = f"BHWL-YZ邮政-{today_str}{seq}"
+    subject_code = _contract_subject_code(standardized.get("合同主体", ""))
+    customer_code = _customer_code(standardized.get("客户分类", ""), standardized.get("客户名称", ""))
+    code_prefix = f"{subject_code}-{customer_code}"
+    seq = _next_contract_code_sequence(code_prefix, today_str)
+    standardized["合同编码"] = f"{code_prefix}-{today_str}{seq}"
 
     # 合同名称 = 第一条线路名 + "一干运输合同"
     route_name = ""
@@ -161,14 +261,7 @@ def process_contract(file_path, api_key, api_provider="anthropic"):
 
     # 合同预警提醒 = 结束时间 - 今天
     end_str = str(standardized.get("合同结束时间", "")).strip()
-    if end_str and end_str not in ("", "null", "None"):
-        try:
-            from datetime import datetime as _datetime
-            end_date = _datetime.strptime(end_str[:10], "%Y-%m-%d").date()
-            days_left = (end_date - _date.today()).days
-            standardized["合同预警提醒"] = str(days_left)
-        except Exception:
-            standardized["合同预警提醒"] = ""
+    standardized["合同预警提醒"] = _calculate_warning_days(end_str)
 
     # 是否完成签订 / 是否同步财务 = 不填
     standardized["是否完成签订"] = ""
@@ -305,25 +398,35 @@ def _is_numeric_equivalent(a, b):
 
 
 def verify_results(extracted, reference_data):
-    """将提取结果与参考答案对比（仅验证需要提取的字段，跳过标红/内部字段）
+    """将提取结果与参考答案对比（验证32列中除8个明确不填字段外的24个字段）
 
     判定规则：
     - "/" 和空字符串视为等价（都表示"无此信息"）
+    - "YYYY/MM/DD" 和 "YYYY-MM-DD" 视为等价
     - 语义等价算一致（如："否"≈"/"、数值精度差异等）
     """
-    from field_knowledge_base import FIELD_KNOWLEDGE_BASE, get_excel_header_for_key
+    from field_knowledge_base import get_verifiable_headers
 
-    # 只验证 stage1_extract=True 的字段（需要从合同提取的）
-    valid_keys = [k for k, v in FIELD_KNOWLEDGE_BASE.items() if v.get("stage1_extract", False)]
-    valid_headers = sorted(set(get_excel_header_for_key(k) for k in valid_keys))
+    valid_headers = get_verifiable_headers()
 
-    def normalize(v):
+    def normalize(v, field=None, row_data=None):
         """标准化：None/空/null→''，'/'→''，去空格"""
         if v is None or v == "null":
             return ""
         v = str(v).strip()
         if v == "/":
             return ""
+        if field == "合同预警提醒":
+            if v.startswith("=") or "DATEDIF" in v.upper() or "NOW()" in v.upper():
+                calculated = _calculate_warning_days((row_data or {}).get("合同结束时间", ""))
+                if calculated:
+                    return calculated
+            calculated = _calculate_warning_days(v)
+            if calculated:
+                return calculated
+        m = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$", v)
+        if m:
+            return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
         return v
 
     # 长文本字段（允许子串匹配）
@@ -354,8 +457,8 @@ def verify_results(extracted, reference_data):
     wrong_count = 0
 
     for header in valid_headers:
-        ai_val = normalize(extracted.get(header, ""))
-        ref_val = normalize(reference_data.get(header, ""))
+        ai_val = normalize(extracted.get(header, ""), header, extracted)
+        ref_val = normalize(reference_data.get(header, ""), header, reference_data)
 
         # 两个都为空 → 一致
         if ai_val == "" and ref_val == "":
@@ -1274,7 +1377,14 @@ class ContractHandler(BaseHTTPRequestHandler):
 
 **对其他差异字段的复核要求**：
 
-对每个差异字段，你需要在合同原文中搜索相关信息，然后输出标准化JSON：
+对每个差异字段，你需要在合同原文中搜索相关信息，然后输出标准化JSON。
+
+**代码生成字段的复核要求**：
+- 登记日期：按系统当天日期生成，格式可为 YYYY/MM/DD 或 YYYY-MM-DD。
+- 合同编码：按“合同主体缩写-客户缩写-YYYYMMDDNNN”生成；北京博华物流有限公司→BHWL，天津智猪网网络科技有限公司→TJZZ，邮政→YZ邮政，京东→JD京东。
+- 合同名称：按第一条线路名 + “一干运输合同”生成。
+- 合同预警提醒：按合同结束时间 - 系统当天日期计算剩余天数。
+- 这些字段合同原文中通常没有最终填写值，复核时应检查生成规则和依赖字段，而不是要求合同原文直接出现最终值。
 
 {
   "field": "字段名",

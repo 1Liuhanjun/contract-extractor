@@ -94,7 +94,7 @@
             <div class="card-header">📊 上传参考答案</div>
             <div class="card-body">
                 <p class="hint">上传 <strong>合同台账表2.xlsx</strong>，系统会自动比对提取结果。</p>
-                <p class="hint">注意：只验证 <strong>21个需要提取的字段</strong>，标红字段和内部字段不参与比对。</p>
+                <p class="hint">注意：验证 <strong>24个有效输出字段</strong>，仅跳过8个明确不填写字段。</p>
                 <p class="hint">第1行（合肥）已被用作少样本示例，建议验证第2行（安庆）和第3行（成都）。</p>
 
                 <div class="drop-zone small-drop"
@@ -753,7 +753,7 @@ function collectDiscrepancies() {
     for (const item of window._verifyData.allComparisons) {
         for (const c of item.comparison.comparisons) {
             if (c.status.includes('❌') || c.status.includes('⚠️')) {
-                if (c.status.includes('多填') && ['登记日期','项目名称/编号','合同编码','合同名称','联系人','电话','地址','快递单号','钉钉审批单号'].includes(c.field)) {
+                if (c.status.includes('多填') && ['项目名称/编号','是否完成签订','是否同步财务','联系人','电话','地址','快递单号','钉钉审批单号'].includes(c.field)) {
                     continue;
                 }
                 discrepancies.push({

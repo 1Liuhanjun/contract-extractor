@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
   - 合同开始/结束时间：中间段落优先 > 末尾签章日期
   - 合同类型：第一中标人→主选, 第二→备选, 默认→主选
   - 合同名称：第一条线路名 + "一干运输合同"
-  - 合同编码：BHWL-YZ邮政-YYYYMMDDNNN
+  - 合同编码：合同主体缩写-客户缩写-YYYYMMDDNNN
   - 合同预警提醒：结束时间 - 今天 (剩余天数)
   - 保证金单位：万元
   - 不再提取：是否完成签订、是否同步财务
@@ -32,13 +32,11 @@ HEADER_TO_KEY["保证金（万元）"] = "保证金_万元"
 HEADER_TO_KEY["油价基准(元/升）"] = "油价基准_元每升"
 
 # ============================================================
-# 不提取、不参与验证的字段
+# 明确不填写、不参与验证的字段
 # ============================================================
 RED_FIELDS = [
-    "登记日期", "项目名称_编号", "合同编码", "合同名称",
-    "是否完成签订", "是否同步财务",
+    "项目名称_编号", "是否完成签订", "是否同步财务",
     "联系人", "电话", "地址", "快递单号", "钉钉审批单号",
-    "合同预警提醒",
 ]
 
 # ============================================================
@@ -49,7 +47,7 @@ FIELD_KNOWLEDGE_BASE = {
     # ---- 内部 / 不提取 ----
     "登记日期": {"description": "系统时间", "source": "internal", "stage1_extract": False},
     "项目名称_编号": {"description": "不用填写", "source": "internal", "stage1_extract": False},
-    "合同编码": {"description": "自动生成", "source": "internal", "stage1_extract": False},
+    "合同编码": {"description": "自动生成（合同主体缩写-客户缩写-日期序号）", "source": "internal", "stage1_extract": False},
     "合同名称": {"description": "自动生成（第一条线路+一干运输合同）", "source": "internal", "stage1_extract": False},
     "是否完成签订": {"description": "不用写", "source": "internal", "stage1_extract": False},
     "是否同步财务": {"description": "不用写", "source": "internal", "stage1_extract": False},
@@ -217,6 +215,10 @@ def get_red_fields():
 
 def is_red_field(key):
     return key in RED_FIELDS
+
+def get_verifiable_headers():
+    """需要与参考答案比对的字段：32列减去8个明确不填字段。"""
+    return [h for h in EXCEL_HEADERS if HEADER_TO_KEY.get(h, h) not in RED_FIELDS]
 
 def get_excel_header_for_key(key):
     reverse_map = {
