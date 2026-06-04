@@ -38,7 +38,62 @@ python3 src/webapp.py
 http://localhost:8080
 ```
 
-## 二、必须配置的环境变量
+## 二、Docker 启动
+
+如果交付给其他人部署，推荐使用 Docker，避免 Python 版本、依赖缺失、Windows/macOS 路径差异造成问题。
+
+先准备 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`，填入真实 key：
+
+```env
+DEEPSEEK_API_KEY=你的DeepSeekKey
+PADDLEOCR_ACCESS_TOKEN=你的PaddleOCRToken
+PADDLEOCR_MODEL=PaddleOCR-VL-1.5
+```
+
+构建镜像：
+
+```bash
+docker build -t contract-extractor .
+```
+
+启动容器：
+
+```bash
+docker run --rm --env-file .env -p 8080:8080 contract-extractor
+```
+
+浏览器打开：
+
+```text
+http://localhost:8080
+```
+
+如果希望把运行结果保存到宿主机目录，可以挂载 `data/`：
+
+```bash
+mkdir -p data
+docker run --rm --env-file .env -p 8080:8080 \
+  -v "$(pwd)/data:/app/data" \
+  contract-extractor
+```
+
+如果还希望保留 Addition 独立输出：
+
+```bash
+mkdir -p data Addition/output
+docker run --rm --env-file .env -p 8080:8080 \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/Addition/output:/app/Addition/output" \
+  contract-extractor
+```
+
+## 三、必须配置的环境变量
 
 `.env` 文件不会提交到仓库，所以别人部署时必须自己创建。最少需要：
 
@@ -65,7 +120,7 @@ OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 ```
 
-## 三、输入和输出
+## 四、输入和输出
 
 支持上传：
 
@@ -91,7 +146,7 @@ Addition/output/     # 附表子项目独立输出
 
 这些都是运行时数据，通常不提交到 Git。
 
-## 四、项目结构
+## 五、项目结构
 
 ```text
 合同提取项目/
@@ -117,11 +172,13 @@ Addition/output/     # 附表子项目独立输出
 ├── docs/                          # 业务规则和项目说明文档
 ├── data/                          # 运行时数据，Git 忽略
 ├── requirements.txt
+├── Dockerfile
+├── .dockerignore
 ├── .env.example
 └── README.md
 ```
 
-## 五、主表和附表是否会互相影响
+## 六、主表和附表是否会互相影响
 
 不会。
 
@@ -137,7 +194,7 @@ Addition/output/     # 附表子项目独立输出
 
 主表不会读取附表的 `youzheng.md`，附表也不会读取主表的 `field_knowledge_base.py`。两套业务规则不在同一个层级里互相污染。
 
-## 六、开发者模式
+## 七、开发者模式
 
 前端默认是普通用户模式，只显示：
 
@@ -157,7 +214,7 @@ Addition/output/     # 附表子项目独立输出
 
 这些功能主要用于调试和项目展示，普通使用不需要打开。
 
-## 七、常见报错
+## 八、常见报错
 
 ### 1. `DEEPSEEK_API_KEY 未设置`
 
@@ -230,7 +287,29 @@ pip install -r requirements.txt
 
 这是换行格式提示，不是代码错误。建议源码统一使用 `LF`。如果 PyCharm 提示 CRLF，可以选择转换为 `LF - Unix and macOS` 后再提交。
 
-## 八、Git 提交注意事项
+### 7. Docker 启动后页面能打开但提取失败
+
+优先检查：
+
+- `docker run` 是否带了 `--env-file .env`。
+- `.env` 里是否配置了 `DEEPSEEK_API_KEY`。
+- 上传 PDF 时是否配置了 `PADDLEOCR_ACCESS_TOKEN`。
+- 镜像构建时是否包含 `Addition/templates/合同台账表_新(3).xlsx` 和 `Addition/data/geo.py`。
+
+可以进入容器检查：
+
+```bash
+docker run --rm --entrypoint sh contract-extractor
+```
+
+然后执行：
+
+```bash
+ls Addition/templates
+ls Addition/data
+```
+
+## 九、Git 提交注意事项
 
 不要提交：
 
@@ -258,6 +337,8 @@ Addition/data/geo.py
 Addition/templates/合同台账表_新(3).xlsx
 web/
 requirements.txt
+Dockerfile
+.dockerignore
 .env.example
 README.md
 ```
@@ -286,7 +367,7 @@ FileNotFoundError: ... Addition/templates/合同台账表_新(3).xlsx
 No module named data
 ```
 
-## 九、推荐测试流程
+## 十、推荐测试流程
 
 1. 启动服务：
 
@@ -310,7 +391,7 @@ http://localhost:8080
 
 7. 检查 `data/results/合同提取汇总.xlsx`，确认有 `主表` 和 `附表` 两个 sheet。
 
-## 十、补充说明
+## 十一、补充说明
 
 - 本项目的核心不是通用 Agent，而是面向合同字段提取的业务规则系统。
 - 主表规则主要在 `src/field_knowledge_base.py` 和 `src/webapp.py` 的硬校验中。

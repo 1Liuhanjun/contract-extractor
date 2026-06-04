@@ -1,0 +1,31 @@
+.git
+.env
+Addition/.env
+
+# Runtime data and generated outputs.
+/data/
+Addition/output/
+output/
+
+# These are source assets required by Addition. Keep them in the image.
+!Addition/data/
+!Addition/data/**
+!Addition/templates/
+!Addition/templates/合同台账表_新(3).xlsx
+
+# Python/cache files.
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+Addition/.pytest_cache/
+
+# IDE/system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Backups and local scratch files.
+*.bak
+contract_extractor_v2/
